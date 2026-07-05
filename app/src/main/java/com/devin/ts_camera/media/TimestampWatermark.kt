@@ -80,6 +80,7 @@ object TimestampWatermark {
                 src.compress(Bitmap.CompressFormat.JPEG, 92, fos)
             }
             src.recycle()
+            android.util.Log.d(TAG, "Photo watermark applied: ${outFile.length()} bytes")
             outFile
         } catch (e: Exception) {
             android.util.Log.w(TAG, "Failed to apply photo watermark", e)

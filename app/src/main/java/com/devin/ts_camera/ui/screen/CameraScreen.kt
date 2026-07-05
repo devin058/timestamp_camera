@@ -134,7 +134,7 @@ fun CameraScreen(
             modifier = Modifier.align(Alignment.TopCenter)
         )
 
-        // Recording indicator
+        // Recording indicator (video only)
         if (uiState.isRecording) {
             RecordingOverlay(
                 durationMs = uiState.recordingDurationMs,
@@ -144,14 +144,12 @@ fun CameraScreen(
             )
         }
 
-        // Real-time clock (always visible during recording)
-        if (uiState.isRecording) {
-            TimestampOverlay(
-                modifier = Modifier
-                    .align(Alignment.TopEnd)
-                    .padding(top = 12.dp, end = 16.dp)
-            )
-        }
+        // Real-time clock — always visible on the viewfinder
+        TimestampOverlay(
+            modifier = Modifier
+                .align(Alignment.TopEnd)
+                .padding(top = 12.dp, end = 16.dp)
+        )
 
         // Bottom bar
         Column(
