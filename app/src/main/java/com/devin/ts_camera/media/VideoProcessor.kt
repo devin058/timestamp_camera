@@ -4,11 +4,7 @@ import android.content.Context
 import android.media.MediaMetadataRetriever
 import android.net.Uri
 import android.util.Log
-import androidx.media3.effect.OverlayEffect
-import androidx.media3.effect.OverlaySettings
 import androidx.media3.transformer.Composition
-import androidx.media3.transformer.EditedMediaItem
-import androidx.media3.transformer.Effects
 import androidx.media3.transformer.ExportException
 import androidx.media3.transformer.ExportResult
 import androidx.media3.common.MediaItem
@@ -128,28 +124,6 @@ object VideoProcessor {
 
         val mediaItem = mediaItemBuilder.build()
 
-        // If a timestamp overlay is requested, wrap in EditedMediaItem
-        val editedMediaItem: EditedMediaItem? = if (params.overlayTimestampMs > 0) {
-            val overlayBitmap = TimestampWatermark.createOverlayBitmap(
-                videoWidth = params.resolution.width,
-                videoHeight = params.resolution.height,
-                timestamp = params.overlayTimestampMs,
-                resolution = params.resolution
-            )
-            val overlayEffect = OverlayEffect.createForBitmap(
-                overlayBitmap, OverlaySettings.DEFAULT
-            )
-            val effects = Effects(
-                /* audioProcessors = */ emptyList(),
-                /* videoEffects = */ listOf(overlayEffect)
-            )
-            EditedMediaItem.Builder(mediaItem)
-                .setEffects(effects)
-                .build()
-        } else {
-            null
-        }
-
         // Build Transformer with encoder settings
         val transformer = Transformer.Builder(context)
             .setVideoMimeType(MimeTypes.VIDEO_H264)
@@ -173,11 +147,7 @@ object VideoProcessor {
             })
             .build()
 
-        if (editedMediaItem != null) {
-            transformer.start(editedMediaItem, params.outputFile.absolutePath)
-        } else {
-            transformer.start(mediaItem, params.outputFile.absolutePath)
-        }
+        transformer.start(mediaItem, params.outputFile.absolutePath)
         deferred.await()
     }
 }

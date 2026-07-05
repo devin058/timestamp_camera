@@ -117,9 +117,7 @@ object MediaStoreSaver {
             }
         } else {
             // ---- Android 9 and below : direct external storage ------------
-            val publicDir = File(
-                Environment.getExternalStoragePublicDirectory(externalPublicDir)
-            )
+            val publicDir = Environment.getExternalStoragePublicDirectory(externalPublicDir)
             if (!publicDir.exists()) {
                 publicDir.mkdirs()
             }

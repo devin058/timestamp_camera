@@ -59,9 +59,8 @@ dependencies {
     implementation(libs.androidx.camera.view)
     implementation(libs.androidx.camera.video)
 
-    // Media3 for video processing (trim/compress/overlay)
+    // Media3 for video processing (trim/compress)
     implementation(libs.androidx.media3.transformer)
-    implementation(libs.androidx.media3.effect)
     implementation(libs.androidx.media3.common)
 
     // Location
