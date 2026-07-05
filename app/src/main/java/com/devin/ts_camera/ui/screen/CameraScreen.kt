@@ -147,8 +147,8 @@ fun CameraScreen(
         // Real-time clock — always visible on the viewfinder
         TimestampOverlay(
             modifier = Modifier
-                .align(Alignment.TopEnd)
-                .padding(top = 12.dp, end = 16.dp)
+                .align(Alignment.TopStart)
+                .padding(top = 12.dp, start = 16.dp)
         )
 
         // Bottom bar

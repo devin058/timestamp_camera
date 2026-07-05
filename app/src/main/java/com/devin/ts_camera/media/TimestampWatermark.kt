@@ -6,6 +6,7 @@ import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.Paint
 import android.graphics.Paint.FontMetrics
+import android.graphics.RectF
 import android.graphics.Typeface
 import android.util.Log
 import java.io.File
@@ -35,14 +36,23 @@ object TimestampWatermark {
 
             val opts = BitmapFactory.Options().apply {
                 inPreferredConfig = Bitmap.Config.ARGB_8888
+                inMutable = true    // required — Canvas() only works on a mutable bitmap
             }
-            val src = BitmapFactory.decodeFile(sourceFile.absolutePath, opts)
+            var src = BitmapFactory.decodeFile(sourceFile.absolutePath, opts)
             if (src == null) {
                 Log.e(TAG, "Failed to decode photo: ${sourceFile.absolutePath}")
                 return sourceFile
             }
 
-            Log.d(TAG, "Photo decoded: ${src.width}x${src.height}")
+            // Double-check mutability — some devices return immutable bitmaps anyway
+            if (!src.isMutable) {
+                Log.d(TAG, "Bitmap is immutable, copying to mutable")
+                val copy = src.copy(Bitmap.Config.ARGB_8888, true)
+                src.recycle()
+                src = copy
+            }
+
+            Log.d(TAG, "Photo decoded: ${src.width}x${src.height}, mutable=${src.isMutable}")
             drawTimestamp(Canvas(src), src.width.toFloat(), src.height.toFloat(), timestamp)
 
             val outFile = File.createTempFile("photo_ts_", ".jpg", cacheDir)
@@ -78,54 +88,117 @@ object TimestampWatermark {
         return bmp
     }
 
+    /**
+     * Create a small transparent bitmap containing ONLY the timestamp text,
+     * suitable for use with [androidx.media3.effect.BitmapOverlay] +
+     * [androidx.media3.effect.OverlaySettings] for positioning.
+     *
+     * Much more memory-efficient than a full-frame overlay when we need
+     * many per-second overlays for a dynamic video timestamp.
+     */
+    fun createTimestampTextBitmap(
+        timestamp: Long,
+        fontSize: Float = 36f
+    ): Bitmap {
+        val textStr = SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.getDefault())
+            .format(Date(timestamp))
+
+        val textPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            this.textSize = fontSize
+            typeface = Typeface.DEFAULT_BOLD
+        }
+        val textW = textPaint.measureText(textStr)
+
+        val fm = FontMetrics()
+        textPaint.getFontMetrics(fm)
+        val textH = fm.bottom - fm.top
+
+        val padH = 20f
+        val padV = 10f
+        val bmpW = (textW + padH * 2f + 4f).toInt().coerceAtLeast(1)
+        // Extra space for the rounded background
+        val bmpH = (textH + padV * 2f + 6f).toInt().coerceAtLeast(1)
+
+        val bmp = Bitmap.createBitmap(bmpW, bmpH, Bitmap.Config.ARGB_8888)
+
+        val canvas = Canvas(bmp)
+
+        // Semi-transparent rounded background
+        val bgPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = Color.argb(64, 0, 0, 0)   // 25 % dark backdrop
+            style = Paint.Style.FILL
+        }
+        canvas.drawRoundRect(
+            RectF(0f, 0f, bmpW.toFloat(), bmpH.toFloat()),
+            12f, 12f, bgPaint
+        )
+
+        // Shadow
+        val shadowPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = Color.argb(140, 0, 0, 0)
+            this.textSize = fontSize
+            typeface = Typeface.DEFAULT_BOLD
+            textAlign = Paint.Align.LEFT
+        }
+        // Text
+        val fgPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = Color.argb(200, 255, 255, 255)  // ~78 % opaque
+            this.textSize = fontSize
+            typeface = Typeface.DEFAULT_BOLD
+            textAlign = Paint.Align.LEFT
+        }
+
+        // Baseline: padV + abs(fm.top) to center text vertically in the bitmap
+        val baseX = padH + 2f
+        val baseY = padV + 3f - fm.top       // fm.top is negative
+
+        canvas.drawText(textStr, baseX + 2f, baseY + 2f, shadowPaint)
+        canvas.drawText(textStr, baseX, baseY, fgPaint)
+
+        return bmp
+    }
+
     // ---- Shared drawing ---------------------------------------------------
 
     /**
-     * Draw a two-line timestamp (date + time) at the bottom-right of the
-     * canvas.  Uses [Paint.FontMetrics] to guarantee the text stays within
-     * the frame regardless of device font metrics.
+     * Draw a single-line timestamp ("yyyy-MM-dd HH:mm:ss.SSS") at the
+     * bottom-center of the canvas.  Uses [Paint.FontMetrics] to guarantee
+     * the text stays within the frame regardless of device font metrics.
      */
     private fun drawTimestamp(canvas: Canvas, w: Float, h: Float, timestamp: Long) {
-        // Font size: 4% of frame width, clamped to reasonable range
-        val fontSize = (w * 0.04f).coerceIn(32f, 120f)
+        // Font size: 3% of frame width — visible even on high-res photos
+        val fontSize = (w * 0.03f).coerceIn(36f, 72f)
 
         val shadowPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-            color = Color.argb(180, 0, 0, 0)
+            color = Color.argb(160, 0, 0, 0)    // solid shadow for readability
             textSize = fontSize
             typeface = Typeface.DEFAULT_BOLD
-            textAlign = Paint.Align.RIGHT
+            textAlign = Paint.Align.CENTER
         }
 
         val textPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-            color = Color.argb(235, 255, 255, 255)
+            color = Color.argb(230, 255, 255, 255)  // ~90 % opaque — clearly visible
             textSize = fontSize
             typeface = Typeface.DEFAULT_BOLD
-            textAlign = Paint.Align.RIGHT
+            textAlign = Paint.Align.CENTER
         }
 
         val fm = FontMetrics()
         textPaint.getFontMetrics(fm)
         // fm.top is negative (distance from baseline to top of glyph)
         // fm.bottom is positive (distance from baseline to bottom)
-        val lineHeight = fm.bottom - fm.top       // total height one text line occupies
-        val lineSpacing = lineHeight * 0.3f        // extra gap between the two lines
 
-        val dateStr = SimpleDateFormat("yyyy-MM-dd", Locale.getDefault()).format(Date(timestamp))
-        val timeStr = SimpleDateFormat("HH:mm:ss", Locale.getDefault()).format(Date(timestamp))
+        val textStr = SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.getDefault())
+            .format(Date(timestamp))
 
         val margin = (w * 0.05f).coerceAtLeast(20f)   // 5% margin from edges
         val shadowOffset = fontSize * 0.04f
-        val x = w - margin
+        val x = w / 2f
 
-        // Bottom line (time) — baseline so that fm.bottom (descent) lands at h-margin
-        val yTime = h - margin - fm.bottom
-        // Top line (date)
-        val yDate = yTime - lineHeight - lineSpacing
+        // Baseline so that fm.bottom (descent) lands at h-margin
+        val y = h - margin - fm.bottom
 
-        canvas.drawText(dateStr, x + shadowOffset, yDate + shadowOffset, shadowPaint)
-        canvas.drawText(dateStr, x, yDate, textPaint)
-
-        canvas.drawText(timeStr, x + shadowOffset, yTime + shadowOffset, shadowPaint)
-        canvas.drawText(timeStr, x, yTime, textPaint)
+        canvas.drawText(textStr, x + shadowOffset, y + shadowOffset, shadowPaint)
+        canvas.drawText(textStr, x, y, textPaint)
     }
 }

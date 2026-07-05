@@ -167,8 +167,8 @@ fun RecordingOverlay(durationMs: Long, modifier: Modifier = Modifier) {
 // ---- Real-time timestamp overlay ---------------------------------------
 
 /**
- * Shows the current date / time as a real-time overlay, updating every second.
- * Useful as a timestamp watermark during video recording.
+ * Shows the current date / time as a single-line real-time overlay, updating
+ * every second.
  */
 @Composable
 fun TimestampOverlay(modifier: Modifier = Modifier) {
@@ -181,32 +181,20 @@ fun TimestampOverlay(modifier: Modifier = Modifier) {
         }
     }
 
-    val dateStr = remember(now) {
-        SimpleDateFormat("yyyy-MM-dd", Locale.getDefault()).format(Date(now))
-    }
-    val timeStr = remember(now) {
-        SimpleDateFormat("HH:mm:ss", Locale.getDefault()).format(Date(now))
+    val textStr = remember(now) {
+        SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.getDefault())
+            .format(Date(now))
     }
 
-    Row(
+    Text(
+        text = textStr,
+        color = Color.White.copy(alpha = 0.5f),
+        style = MaterialTheme.typography.labelMedium,
         modifier = modifier
             .clip(RoundedCornerShape(12.dp))
-            .background(Color.Black.copy(alpha = 0.55f))
-            .padding(horizontal = 10.dp, vertical = 4.dp),
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(6.dp)
-    ) {
-        Text(
-            text = dateStr,
-            color = Color.White.copy(alpha = 0.85f),
-            style = MaterialTheme.typography.labelSmall
-        )
-        Text(
-            text = timeStr,
-            color = Color.White,
-            style = MaterialTheme.typography.labelMedium
-        )
-    }
+            .background(Color.Black.copy(alpha = 0.25f))
+            .padding(horizontal = 10.dp, vertical = 4.dp)
+    )
 }
 
 // ---- Capture button ----------------------------------------------------

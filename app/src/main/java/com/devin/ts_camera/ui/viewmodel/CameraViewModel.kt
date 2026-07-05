@@ -35,6 +35,7 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
     private val locationProvider = LocationProvider(application)
     private var recordingTimerJob: Job? = null
     private var recordingStartTimeMs: Long = 0L
+    private var videoRecordingStartWallTimeMs: Long = 0L  // wall-clock time when recording STARTED
     private var lastRecordedVideoFile: File? = null
 
     private var captureSequence = 0
@@ -102,10 +103,19 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
 
         cameraController.takePhoto(
             onResult = { file ->
+                val app = getApplication<Application>()
+                val ts = System.currentTimeMillis()
+                // Burn timestamp watermark into the photo immediately so the
+                // preview shows it, not just the raw capture.
+                val watermarked = TimestampWatermark.applyToPhoto(
+                    sourceFile = file,
+                    cacheDir = app.cacheDir,
+                    timestamp = ts
+                )
                 val result = PhotoResult(
-                    uri = Uri.fromFile(file),
-                    file = file,
-                    timestamp = System.currentTimeMillis(),
+                    uri = Uri.fromFile(watermarked),
+                    file = watermarked,
+                    timestamp = ts,
                     location = _uiState.value.location
                 )
                 _uiState.update {
@@ -132,6 +142,7 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
             onStarted = { videoFile ->
                 lastRecordedVideoFile = videoFile
                 recordingStartTimeMs = SystemClock.elapsedRealtime()
+                videoRecordingStartWallTimeMs = System.currentTimeMillis()
                 _uiState.update { it.copy(isRecording = true, recordingDurationMs = 0L) }
                 startRecordingTimer()
             },
@@ -223,19 +234,19 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
             generateDefaultFilename("IMG")
         }
 
-        // Burn timestamp watermark onto the photo
-        val watermarkedFile = TimestampWatermark.applyToPhoto(
+        // Re-apply watermark (belt-and-suspenders — capture might have missed it)
+        val watermarked = TimestampWatermark.applyToPhoto(
             sourceFile = photo.file,
             cacheDir = app.cacheDir,
             timestamp = photo.timestamp
         )
 
         // Write EXIF to the watermarked file before copying to MediaStore
-        writeExifMetadata(watermarkedFile, photo.location, photo.timestamp)
+        writeExifMetadata(watermarked, photo.location, photo.timestamp)
 
         return MediaStoreSaver.savePhoto(
             context = app,
-            sourceFile = watermarkedFile,
+            sourceFile = watermarked,
             displayName = filename
         )
     }
@@ -258,7 +269,8 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
                 compressionLevel = options.compressionLevel,
                 trimStartMs = options.trimStartMs,
                 trimEndMs = if (options.trimEndMs > 0) options.trimEndMs else video.durationMs,
-                overlayTimestampMs = video.timestamp
+                overlayTimestampMs = videoRecordingStartWallTimeMs,
+                videoStartWallTimeMs = videoRecordingStartWallTimeMs
             ),
             onProgress = { progress ->
                 _uiState.update { it.copy(processingProgress = progress) }
