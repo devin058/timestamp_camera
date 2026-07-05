@@ -1,0 +1,52 @@
+# Built application files
+*.apk
+*.ap_
+*.aab
+*.dex
+*.class
+
+# Gradle files
+.gradle/
+/build/
+/app/build/
+
+# Local configuration
+local.properties
+
+# IDE / Editor
+.idea/
+*.iml
+*.iws
+*.ipr
+.vscode/
+
+# macOS
+.DS_Store
+
+# Native / C++ build
+.externalNativeBuild/
+.cxx/
+*.o
+*.obj
+
+# Debug / Logs
+*.hprof
+*.log
+
+# Android captures
+/captures
+
+# Keystore & signing
+*.jks
+*.keystore
+*.p12
+*.pkcs12
+
+# Environment artifacts
+C:/
+
+# Package files
+*.rar
+*.tar
+*.tar.gz
+*.zip
