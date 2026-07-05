@@ -5,6 +5,7 @@ import android.media.MediaMetadataRetriever
 import android.net.Uri
 import android.util.Log
 import androidx.media3.effect.OverlayEffect
+import androidx.media3.effect.OverlaySettings
 import androidx.media3.transformer.Composition
 import androidx.media3.transformer.EditedMediaItem
 import androidx.media3.transformer.Effects
@@ -135,8 +136,13 @@ object VideoProcessor {
                 timestamp = params.overlayTimestampMs,
                 resolution = params.resolution
             )
-            val overlayEffect = OverlayEffect.createForBitmap(overlayBitmap)
-            val effects = Effects(listOf(), listOf(overlayEffect))
+            val overlayEffect = OverlayEffect.createForBitmap(
+                overlayBitmap, OverlaySettings.DEFAULT
+            )
+            val effects = Effects(
+                /* audioProcessors = */ emptyList(),
+                /* videoEffects = */ listOf(overlayEffect)
+            )
             EditedMediaItem.Builder(mediaItem)
                 .setEffects(effects)
                 .build()
