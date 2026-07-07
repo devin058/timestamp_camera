@@ -37,6 +37,11 @@ android {
     buildFeatures {
         compose = true
     }
+    packaging {
+        jniLibs {
+            useLegacyPackaging = true
+        }
+    }
 }
 
 dependencies {
@@ -59,16 +64,17 @@ dependencies {
     implementation(libs.androidx.camera.view)
     implementation(libs.androidx.camera.video)
 
-    // Media3 for video processing (trim/compress/overlay)
-    implementation(libs.androidx.media3.transformer)
-    implementation(libs.androidx.media3.effect)
-    implementation(libs.androidx.media3.common)
-
     // Location
     implementation(libs.play.services.location)
 
     // Coil (image loading for preview)
     implementation(libs.coil.compose)
+
+    // FFmpegKit + dependencies via local files
+    implementation(fileTree(mapOf("dir" to "libs", "include" to listOf("*.aar", "*.jar"))))
+
+    // Media3 common (MediaMetadataRetriever for duration queries via VideoProcessor)
+    implementation(libs.androidx.media3.common)
 
     // ExifInterface (GPS metadata in photos)
     implementation(libs.androidx.exifinterface)

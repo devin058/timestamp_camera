@@ -72,7 +72,7 @@ object TimestampWatermark {
 
     /**
      * Create a transparent overlay bitmap with timestamp text for
-     * Media3 [androidx.media3.effect.BitmapOverlay].
+     * FFmpeg subtitle-based watermarking.
      */
     fun createOverlayBitmap(
         videoWidth: Int,
@@ -89,12 +89,8 @@ object TimestampWatermark {
     }
 
     /**
-     * Create a small transparent bitmap containing ONLY the timestamp text,
-     * suitable for use with [androidx.media3.effect.BitmapOverlay] +
-     * [androidx.media3.effect.OverlaySettings] for positioning.
-     *
-     * Much more memory-efficient than a full-frame overlay when we need
-     * many per-second overlays for a dynamic video timestamp.
+     * Create a small transparent bitmap containing ONLY the timestamp text.
+     * Useful for preview thumbnails or custom compositing.
      */
     fun createTimestampTextBitmap(
         timestamp: Long,

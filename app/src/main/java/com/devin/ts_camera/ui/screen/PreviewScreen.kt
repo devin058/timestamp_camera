@@ -189,13 +189,21 @@ fun PreviewScreen(
                     .background(Color.Black.copy(alpha = 0.6f)),
                 contentAlignment = Alignment.Center
             ) {
-                Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                    CircularProgressIndicator(
+                Column(
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    modifier = Modifier.padding(horizontal = 48.dp)
+                ) {
+                    LinearProgressIndicator(
+                        progress = { uiState.processingProgress },
                         color = Color.White,
-                        modifier = Modifier.size(48.dp)
+                        trackColor = Color.White.copy(alpha = 0.2f),
+                        modifier = Modifier.fillMaxWidth().height(6.dp)
                     )
                     Spacer(Modifier.height(12.dp))
-                    Text("正在处理…", color = Color.White)
+                    Text(
+                        "处理中… ${(uiState.processingProgress * 100).toInt()}%",
+                        color = Color.White
+                    )
                 }
             }
         }
@@ -210,14 +218,15 @@ fun PreviewScreen(
             thumbnails = videoThumbnails,
             onSave = { options ->
                 showSaveSheet = false
-                viewModel.saveWithOptions(options) { _, saveLocation ->
-                    Toast.makeText(
-                        context,
-                        "已保存至 $saveLocation",
-                        Toast.LENGTH_LONG
-                    ).show()
-                    onNavigateBack()
-                }
+                viewModel.saveWithOptions(options,
+                    onSuccess = { _, saveLocation ->
+                        Toast.makeText(context, "已保存至 $saveLocation", Toast.LENGTH_LONG).show()
+                        onNavigateBack()
+                    },
+                    onError = { msg ->
+                        Toast.makeText(context, "保存失败: $msg", Toast.LENGTH_LONG).show()
+                    }
+                )
             },
             onCancel = { showSaveSheet = false }
         )

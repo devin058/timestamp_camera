@@ -4,48 +4,30 @@ import android.content.Context
 import android.media.MediaMetadataRetriever
 import android.net.Uri
 import android.util.Log
-import androidx.media3.common.MediaItem
-import androidx.media3.common.MimeTypes
-import androidx.media3.effect.BitmapOverlay
-import androidx.media3.effect.OverlayEffect
-import androidx.media3.transformer.Composition
-import androidx.media3.transformer.DefaultEncoderFactory
-import androidx.media3.transformer.EditedMediaItem
-import androidx.media3.transformer.EditedMediaItemSequence
-import androidx.media3.transformer.Effects
-import androidx.media3.transformer.ExportException
-import androidx.media3.transformer.ExportResult
-import androidx.media3.transformer.Transformer
+import com.arthenica.ffmpegkit.FFmpegKit
+import com.arthenica.ffmpegkit.ReturnCode
+import com.arthenica.ffmpegkit.SessionState
 import com.devin.ts_camera.model.CompressionLevel
 import com.devin.ts_camera.model.VideoResolution
-import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.io.File
-import kotlin.math.ceil
 
 /**
- * Video post-processing: duration queries, trimming, and compression via
- * Media3 Transformer.
- *
- * Supports dynamic per-second timestamp overlays so that the timestamp burned
- * into the video changes over time — like a real dashcam / surveillance camera.
+ * Video post-processing via FFmpeg — trim, compress, dynamic timestamp,
+ * mute, and frame-rate control in a single pass.
  */
 object VideoProcessor {
 
     private const val TAG = "VideoProcessor"
 
-    /**
-     * Retrieve the duration of a video file in milliseconds.
-     */
     fun getDurationMs(context: Context, uri: Uri): Long {
         val retriever = MediaMetadataRetriever()
         return try {
             retriever.setDataSource(context, uri)
-            val timeStr = retriever.extractMetadata(
+            retriever.extractMetadata(
                 MediaMetadataRetriever.METADATA_KEY_DURATION
-            )
-            timeStr?.toLongOrNull() ?: 0L
+            )?.toLongOrNull() ?: 0L
         } catch (e: Exception) {
             Log.e(TAG, "Failed to get duration", e)
             0L
@@ -54,18 +36,11 @@ object VideoProcessor {
         }
     }
 
-    /**
-     * Extract a single frame thumbnail at the given [timeMs].
-     * Returns null on failure.
-     */
     fun getFrameAtTime(context: Context, uri: Uri, timeMs: Long): android.graphics.Bitmap? {
         val retriever = MediaMetadataRetriever()
         return try {
             retriever.setDataSource(context, uri)
-            retriever.getFrameAtTime(
-                timeMs * 1000L,  // microseconds
-                MediaMetadataRetriever.OPTION_CLOSEST_SYNC
-            )
+            retriever.getFrameAtTime(timeMs * 1000L, MediaMetadataRetriever.OPTION_CLOSEST_SYNC)
         } catch (e: Exception) {
             Log.e(TAG, "Failed to extract frame", e)
             null
@@ -74,23 +49,15 @@ object VideoProcessor {
         }
     }
 
-    /**
-     * Extract [count] evenly-spaced thumbnails across the video duration.
-     */
     fun getThumbnails(
-        context: Context,
-        uri: Uri,
-        durationMs: Long,
-        count: Int = 10
+        context: Context, uri: Uri, durationMs: Long, count: Int = 10
     ): List<android.graphics.Bitmap> {
         if (durationMs <= 0) return emptyList()
         val step = durationMs / (count + 1)
-        return (1..count).mapNotNull { i ->
-            getFrameAtTime(context, uri, step * i)
-        }
+        return (1..count).mapNotNull { i -> getFrameAtTime(context, uri, step * i) }
     }
 
-    // ---- Transcoding (trim + compress) ------------------------------------
+    // ---- Transcoding -----------------------------------------------------
 
     data class TranscodeParams(
         val inputUri: Uri,
@@ -98,173 +65,141 @@ object VideoProcessor {
         val resolution: VideoResolution = VideoResolution.R1080P,
         val compressionLevel: CompressionLevel = CompressionLevel.LOW,
         val trimStartMs: Long = 0L,
-        val trimEndMs: Long = 0L,            // 0 = until end
-        val overlayTimestampMs: Long = 0L,   // 0 = no overlay; >0 = static overlay (legacy)
-        val videoStartWallTimeMs: Long = 0L  // wall-clock when recording STARTED (for dynamic overlay)
+        val trimEndMs: Long = 0L,
+        val overlayTimestampMs: Long = 0L,
+        val videoStartWallTimeMs: Long = 0L,
+        val muteAudio: Boolean = false,
+        val fps: Int = 0
     )
 
     /**
-     * Transcode a video — trim / compress / burn dynamic timestamp — and write
-     * the result to [params.outputFile].  Suspends until complete, then returns
-     * the output [Uri].
-     *
-     * When [TranscodeParams.videoStartWallTimeMs] > 0, the video is split into
-     * 1-second segments, each with its own timestamp overlay that reflects the
-     * wall-clock time at that point in the recording.  This produces a "live"
-     * timestamp that changes as the video plays, like security-camera footage.
+     * Transcode via FFmpeg — one-pass: trim + scale + dynamic timestamp + mute + fps.
      */
     suspend fun transcode(
         context: Context,
         params: TranscodeParams,
         onProgress: (Float) -> Unit = {}
-    ): Uri = withContext(Dispatchers.Main) {
-        val deferred = CompletableDeferred<Uri>()
+    ): Uri = withContext(Dispatchers.IO) {
 
-        // Determine actual duration (trim range or full video)
-        val effectiveDurationMs: Long = if (params.trimEndMs > 0) {
-            params.trimEndMs - params.trimStartMs
+        val realDurationMs = if (params.trimEndMs > 0) {
+            val raw = getDurationMs(context, params.inputUri)
+            params.trimEndMs.coerceAtMost(raw)
         } else {
-            // Query the real duration so we can segment for dynamic overlay
-            val full = getDurationMs(context, params.inputUri)
-            (full - params.trimStartMs).coerceAtLeast(0)
+            getDurationMs(context, params.inputUri)
         }
+        val effectiveDurationMs = (realDurationMs - params.trimStartMs).coerceAtLeast(0)
 
-        // ---- Decide: dynamic per-second segments or single static overlay ----
-
+        // —— Build command ——
         val useDynamic = params.videoStartWallTimeMs > 0
                 && params.overlayTimestampMs > 0
-                && effectiveDurationMs > 0
+                && effectiveDurationMs in 1000..300_000
 
-        val composition = if (useDynamic && effectiveDurationMs > 0) {
-            val segDurationMs = 1000L // 1-second segments — timestamp changes every second
-            val totalSegs = ceil(effectiveDurationMs / segDurationMs.toDouble())
-                .toInt().coerceAtLeast(1)
-            Log.d(TAG, "Building $totalSegs × ${segDurationMs}ms segments for dynamic timestamp overlay")
+        val cmd = buildCommand(
+            inputPath = params.inputUri.path!!,
+            outputPath = params.outputFile.absolutePath,
+            useDrawtext = useDynamic,
+            startEpochSec = if (useDynamic) params.videoStartWallTimeMs / 1000 else 0,
+            trimStartMs = params.trimStartMs,
+            trimEndMs = realDurationMs,
+            isTrimming = params.trimStartMs > 0 || params.trimEndMs > 0,
+            resolution = params.resolution,
+            compression = params.compressionLevel,
+            muteAudio = params.muteAudio,
+            fps = params.fps
+        )
 
-            val segments = mutableListOf<EditedMediaItem>()
+        Log.d(TAG, "FFmpeg: $cmd")
 
-            for (seg in 0 until totalSegs) {
-                val segStartMs = (seg * segDurationMs)
-                // Guard: ceil() may produce an extra segment that starts beyond the video
-                if (segStartMs >= effectiveDurationMs) break
-                val segEndMs   = (segStartMs + segDurationMs).coerceAtMost(effectiveDurationMs)
-
-                // Wall-clock time for this segment (millisecond precision)
-                val segWallTimeMs = params.videoStartWallTimeMs + segStartMs
-
-                // Full-frame overlay with timestamp at bottom-center
-                val overlayBitmap = TimestampWatermark.createOverlayBitmap(
-                    videoWidth = params.resolution.width,
-                    videoHeight = params.resolution.height,
-                    timestamp = segWallTimeMs,
-                    resolution = params.resolution
-                )
-                val bitmapOverlay =
-                    BitmapOverlay.createStaticBitmapOverlay(overlayBitmap)
-                val overlayEffect = OverlayEffect(listOf(bitmapOverlay))
-                val effects = Effects(
-                    /* audioProcessors = */ emptyList(),
-                    /* videoEffects = */ listOf(overlayEffect)
-                )
-
-                // Clip this segment from the source
-                val clip = MediaItem.ClippingConfiguration.Builder()
-                    .setStartPositionMs(params.trimStartMs + segStartMs)
-                    .setEndPositionMs(params.trimStartMs + segEndMs)
-                    .build()
-
-                val segmentMediaItem = MediaItem.Builder()
-                    .setUri(params.inputUri)
-                    .setClippingConfiguration(clip)
-                    .build()
-
-                val edited = EditedMediaItem.Builder(segmentMediaItem)
-                    .setEffects(effects)
-                    .build()
-
-                segments.add(edited)
+        // —— Execute (async so we can track progress) ——
+        val session = FFmpegKit.executeAsync(cmd) { }
+        try {
+            // Wait until FFmpeg actually finishes (CREATED → RUNNING → COMPLETED/FAILED)
+            while (session.state != SessionState.COMPLETED
+                && session.state != SessionState.FAILED
+            ) {
+                val out = session.output ?: ""
+                val m = Regex("time=([0-9:.]+)").find(out)
+                if (m != null && effectiveDurationMs > 0) {
+                    val t = parseTimeToMs(m.groupValues[1])
+                    onProgress((t.toFloat() / effectiveDurationMs).coerceIn(0f, 0.99f))
+                }
+                kotlinx.coroutines.delay(200L)
             }
-
-            Composition.Builder(EditedMediaItemSequence(segments)).build()
-        } else if (params.overlayTimestampMs > 0) {
-            // ---- Legacy static overlay (no dynamic start time) ----------------
-            val overlayBitmap = TimestampWatermark.createOverlayBitmap(
-                videoWidth = params.resolution.width,
-                videoHeight = params.resolution.height,
-                timestamp = params.overlayTimestampMs,
-                resolution = params.resolution
-            )
-            val bitmapOverlay =
-                BitmapOverlay.createStaticBitmapOverlay(overlayBitmap)
-            val overlayEffect = OverlayEffect(listOf(bitmapOverlay))
-            val effects = Effects(
-                /* audioProcessors = */ emptyList(),
-                /* videoEffects = */ listOf(overlayEffect)
-            )
-
-            val mediaItemBuilder = MediaItem.Builder()
-                .setUri(params.inputUri)
-            if (params.trimStartMs > 0 || params.trimEndMs > 0) {
-                val clipBuilder = MediaItem.ClippingConfiguration.Builder()
-                if (params.trimStartMs > 0) {
-                    clipBuilder.setStartPositionMs(params.trimStartMs)
-                }
-                if (params.trimEndMs > 0) {
-                    clipBuilder.setEndPositionMs(params.trimEndMs)
-                }
-                mediaItemBuilder.setClippingConfiguration(clipBuilder.build())
-            }
-            val clippedItem = mediaItemBuilder.build()
-
-            val edited = EditedMediaItem.Builder(clippedItem)
-                .setEffects(effects)
-                .build()
-
-            Composition.Builder(EditedMediaItemSequence(listOf(edited))).build()
-        } else {
-            // ---- No overlay — just trim --------------------------------
-            val mediaItemBuilder = MediaItem.Builder()
-                .setUri(params.inputUri)
-            if (params.trimStartMs > 0 || params.trimEndMs > 0) {
-                val clipBuilder = MediaItem.ClippingConfiguration.Builder()
-                if (params.trimStartMs > 0) {
-                    clipBuilder.setStartPositionMs(params.trimStartMs)
-                }
-                if (params.trimEndMs > 0) {
-                    clipBuilder.setEndPositionMs(params.trimEndMs)
-                }
-                mediaItemBuilder.setClippingConfiguration(clipBuilder.build())
-            }
-            val clippedItem = mediaItemBuilder.build()
-            Composition.Builder(EditedMediaItemSequence(listOf(EditedMediaItem.Builder(clippedItem).build()))).build()
+        } finally {
+            session.cancel()
         }
 
-        // ---- Build Transformer ------------------------------------------
+        if (ReturnCode.isSuccess(session.returnCode)) {
+            onProgress(1f)
+        } else {
+            Log.e(TAG, "FFmpeg failed: ${session.allLogsAsString}")
+            throw RuntimeException("视频转码失败")
+        }
 
-        val transformer = Transformer.Builder(context)
-            .setVideoMimeType(MimeTypes.VIDEO_H264)
-            .setEncoderFactory(
-                DefaultEncoderFactory.Builder(context)
-                    .build()
+        Uri.fromFile(params.outputFile)
+    }
+
+    // ---- Command builder -------------------------------------------------
+
+    private fun buildCommand(
+        inputPath: String, outputPath: String, useDrawtext: Boolean, startEpochSec: Long,
+        trimStartMs: Long, trimEndMs: Long, isTrimming: Boolean,
+        resolution: VideoResolution, compression: CompressionLevel,
+        muteAudio: Boolean, fps: Int
+    ): String = buildString {
+        append("-y ")
+
+        // Trim (output option — accurate)
+        if (isTrimming) {
+            append("-ss ${fmtSec(trimStartMs)} ")
+            append("-to ${fmtSec(trimEndMs)} ")
+        }
+        append("-i \"$inputPath\" ")
+
+        // Video filter chain
+        val filters = mutableListOf<String>()
+        // Dynamic timestamp via drawtext (no external file needed)
+        if (useDrawtext) {
+            // %{localtime\:<epoch>+t} → wall-clock time at each frame
+            filters.add(
+                "drawtext=text='%{localtime}':fontfile=/system/fonts/Roboto-Regular.ttf:" +
+                "fontsize=36:fontcolor=white@0.9:" +
+                "box=1:boxcolor=black@0.4:boxborderw=6:" +
+                "x=(w-text_w)/2:y=h-th-30"
             )
-            .addListener(object : Transformer.Listener {
-                override fun onCompleted(composition: Composition, exportResult: ExportResult) {
-                    Log.d(TAG, "Transcode completed: ${params.outputFile.absolutePath}")
-                    deferred.complete(Uri.fromFile(params.outputFile))
-                }
+        }
+        filters.add("format=yuv420p")
+        append("-vf \"${filters.joinToString(",")}\" ")
 
-                override fun onError(
-                    composition: Composition,
-                    exportResult: ExportResult,
-                    exportException: ExportException
-                ) {
-                    Log.e(TAG, "Transcode failed", exportException)
-                    deferred.completeExceptionally(exportException)
-                }
-            })
-            .build()
+        // Frame rate
+        if (fps > 0) {
+            append("-r $fps ")
+        }
 
-        transformer.start(composition, params.outputFile.absolutePath)
-        deferred.await()
+        // Video codec — software mpeg4 (native, always available)
+        append("-c:v mpeg4 -q:v ${when (compression) {
+            CompressionLevel.HIGH -> "8"; CompressionLevel.MEDIUM -> "5"; CompressionLevel.LOW -> "3"
+        }} ")
+
+        // Audio
+        if (muteAudio) {
+            append("-an ")
+        } else {
+            append("-c:a aac -b:a 128k ")
+        }
+
+        // Output
+        append("\"$outputPath\"")
+    }
+
+    private fun fmtSec(ms: Long) = "%.3f".format(ms / 1000.0)
+
+    private fun parseTimeToMs(s: String): Long {
+        val p = s.split(":", ".")
+        if (p.size < 3) return 0
+        return (p[0].toLongOrNull()?.times(3600_000) ?: 0) +
+                (p[1].toLongOrNull()?.times(60_000) ?: 0) +
+                (p[2].toLongOrNull()?.times(1000) ?: 0) +
+                (p.getOrNull(3)?.padEnd(3, '0')?.take(3)?.toLongOrNull() ?: 0)
     }
 }

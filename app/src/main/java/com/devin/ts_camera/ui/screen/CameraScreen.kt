@@ -7,19 +7,25 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.camera.view.PreviewView
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalLifecycleOwner
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
 import androidx.compose.runtime.collectAsState
 import com.devin.ts_camera.model.CaptureMode
+import kotlinx.coroutines.delay
 import com.devin.ts_camera.ui.components.*
 import com.devin.ts_camera.ui.viewmodel.CameraViewModel
 
@@ -35,6 +41,21 @@ fun CameraScreen(
     val uiState by viewModel.uiState.collectAsState()
     val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
+
+    // Keep screen on only during video recording; allow timeout otherwise
+    DisposableEffect(uiState.isRecording) {
+        val activity = context as? android.app.Activity
+        if (uiState.isRecording) {
+            activity?.window?.addFlags(
+                android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON
+            )
+        }
+        onDispose {
+            activity?.window?.clearFlags(
+                android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON
+            )
+        }
+    }
 
     // PreviewView reference — set after the view is attached
     var previewViewRef by remember { mutableStateOf<PreviewView?>(null) }
@@ -81,7 +102,37 @@ fun CameraScreen(
 
     // ---- UI -----------------------------------------------------------
 
-    Box(modifier = modifier.fillMaxSize().background(Color.Black)) {
+    Box(
+        modifier = modifier
+            .fillMaxSize()
+            .background(Color.Black)
+            .pointerInput(Unit) {
+                var totalX = 0f
+                var totalY = 0f
+                detectDragGestures(
+                    onDragEnd = {
+                        // Fire action based on accumulated drag direction & distance
+                        val absX = kotlin.math.abs(totalX)
+                        val absY = kotlin.math.abs(totalY)
+                        if (absX > absY && absX > 80f) {
+                            // Horizontal swipe — switch mode
+                            viewModel.setCaptureMode(
+                                if (totalX > 0) CaptureMode.VIDEO else CaptureMode.PHOTO
+                            )
+                        } else if (absY > absX && absY > 80f) {
+                            // Vertical swipe — toggle camera
+                            viewModel.toggleCamera()
+                        }
+                        totalX = 0f; totalY = 0f
+                    },
+                    onDragCancel = { totalX = 0f; totalY = 0f }
+                ) { change, dragAmount ->
+                    change.consume()
+                    totalX += dragAmount.x
+                    totalY += dragAmount.y
+                }
+            }
+    ) {
 
         // Camera preview
         if (uiState.hasCameraPermission) {
@@ -179,6 +230,66 @@ fun CameraScreen(
                 },
                 modifier = Modifier.padding(bottom = 32.dp)
             )
+        }
+
+        // ---- Power-save dim during long recordings -----------------------
+        // After 2 min, dim screen. Tap to wake for 30 s, then re-dim.
+
+        val dimThresholdMs = 120_000L
+        val wakeTimeoutMs = 30_000L
+        var lastWakeMs by remember { mutableStateOf(0L) }
+        var isDimmed by remember { mutableStateOf(false) }
+
+        LaunchedEffect(uiState.isRecording, uiState.recordingDurationMs) {
+            if (!uiState.isRecording) {
+                isDimmed = false
+            } else if (!isDimmed
+                && uiState.recordingDurationMs >= dimThresholdMs
+                && System.currentTimeMillis() - lastWakeMs >= wakeTimeoutMs
+            ) {
+                isDimmed = true
+            }
+        }
+
+        if (isDimmed) {
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .background(Color.Black)
+                    .clickable {
+                        lastWakeMs = System.currentTimeMillis()
+                        isDimmed = false
+                    },
+                contentAlignment = Alignment.Center
+            ) {
+                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                    // Red recording dot
+                    Box(
+                        modifier = Modifier
+                            .size(24.dp)
+                            .clip(CircleShape)
+                            .background(Color.Red)
+                    )
+                    Spacer(Modifier.height(20.dp))
+                    Text(
+                        text = "视频录制中",
+                        color = Color.White.copy(alpha = 0.6f),
+                        style = MaterialTheme.typography.titleLarge
+                    )
+                    Spacer(Modifier.height(8.dp))
+                    Text(
+                        text = "单击返回",
+                        color = Color.White.copy(alpha = 0.35f),
+                        style = MaterialTheme.typography.bodyMedium
+                    )
+                    Spacer(Modifier.height(24.dp))
+                    Text(
+                        text = formatDuration(uiState.recordingDurationMs),
+                        color = Color.White.copy(alpha = 0.5f),
+                        style = MaterialTheme.typography.bodySmall
+                    )
+                }
+            }
         }
 
         // Processing overlay

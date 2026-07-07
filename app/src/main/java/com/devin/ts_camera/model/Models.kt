@@ -51,7 +51,9 @@ data class SaveOptions(
     val trimStartMs: Long = 0L,
     val trimEndMs: Long = 0L,          // 0 means "use full duration"
     val resolution: VideoResolution = VideoResolution.R1080P,
-    val compressionLevel: CompressionLevel = CompressionLevel.LOW
+    val compressionLevel: CompressionLevel = CompressionLevel.LOW,
+    val muteAudio: Boolean = false,     // remove audio track from saved video
+    val fps: Int = 0                   // 0 = keep original; >0 = force output frame rate
 ) {
     /** Actual bitrate after applying compression level to the resolution default. */
     fun effectiveBitrate(): Int =

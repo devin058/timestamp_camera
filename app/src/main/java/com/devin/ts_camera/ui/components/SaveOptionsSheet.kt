@@ -45,14 +45,21 @@ fun SaveOptionsSheet(
     var selectedCompression by remember { mutableStateOf(CompressionLevel.LOW) }
     var trimStartMs by remember { mutableStateOf(0L) }
     var trimEndMs by remember { mutableStateOf(0L) }
+    var muteAudio by remember { mutableStateOf(false) }
+    var selectedFps by remember { mutableStateOf(0) }
+
+    // Computed bitrate from resolution + compression
+    val effectiveBitrate = ((selectedResolution.defaultBitrate * selectedCompression.fraction).toInt())
+        .coerceIn(selectedResolution.minBitrate, selectedResolution.maxBitrate)
 
     // Estimated file size
     val effectiveDuration = if (trimEndMs > 0) trimEndMs - trimStartMs else durationMs
-    val bitrate = ((selectedResolution.defaultBitrate * selectedCompression.fraction).toInt())
-        .coerceIn(selectedResolution.minBitrate, selectedResolution.maxBitrate)
-    val estimatedBytes = if (effectiveDuration > 0) {
-        bitrate.toLong() * effectiveDuration / 1000L / 8L
-    } else 0L
+    val estimatedBytes = if (isVideo && effectiveDuration > 0) {
+        effectiveBitrate.toLong() * effectiveDuration / 1000L / 8L
+    } else {
+        // Photo: rough estimate ~1.5 bits per pixel @ JPEG quality 92
+        (selectedResolution.width * selectedResolution.height * 1.5).toLong() / 8L
+    }
 
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
 
@@ -148,13 +155,15 @@ fun SaveOptionsSheet(
                 }
 
                 // Compression slider (fine-tuning bitrate)
-                val bitrateMbps = bitrate / 1_000_000f
+                val effectiveBitrate = ((selectedResolution.defaultBitrate * selectedCompression.fraction).toInt())
+                    .coerceIn(selectedResolution.minBitrate, selectedResolution.maxBitrate)
+                val bitrateMbps = effectiveBitrate / 1_000_000f
                 Text(
                     text = "码率: %.1f Mbps".format(bitrateMbps),
                     style = MaterialTheme.typography.bodyMedium
                 )
                 Slider(
-                    value = bitrate.toFloat(),
+                    value = effectiveBitrate.toFloat(),
                     onValueChange = { newBitrate ->
                         // Map slider to nearest compression level
                         val fraction = newBitrate / selectedResolution.defaultBitrate.toFloat()
@@ -169,6 +178,51 @@ fun SaveOptionsSheet(
                 )
             }
 
+            // ---- Mute audio (video only) ----------------------------------
+            if (isVideo) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clickable { muteAudio = !muteAudio }
+                        .padding(vertical = 4.dp),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Column {
+                        Text(
+                            text = "🔇 静音",
+                            style = MaterialTheme.typography.titleMedium
+                        )
+                        Text(
+                            text = "保存的视频将不含声音",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                    Switch(
+                        checked = muteAudio,
+                        onCheckedChange = { muteAudio = it }
+                    )
+                }
+            }
+
+            // ---- Frame rate (video only) -----------------------------------
+            if (isVideo) {
+                Text("帧率", style = MaterialTheme.typography.titleMedium)
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    listOf(0 to "原帧率", 24 to "24", 30 to "30", 60 to "60").forEach { (v, l) ->
+                        FilterChip(
+                            selected = selectedFps == v,
+                            onClick = { selectedFps = v },
+                            label = { Text(l) }
+                        )
+                    }
+                }
+            }
+
             // ---- Estimated file size --------------------------------------
             Text(
                 text = "预计保存大小: ${formatFileSize(estimatedBytes)}",
@@ -180,7 +234,7 @@ fun SaveOptionsSheet(
                     if (isVideo) {
                         append("分辨率: ${selectedResolution.label} (${selectedResolution.width}×${selectedResolution.height})")
                         append("  |  ")
-                        append("码率: %.1f Mbps".format(bitrate / 1_000_000f))
+                        append("码率: %.1f Mbps".format(effectiveBitrate / 1_000_000f))
                         if (effectiveDuration > 0) {
                             append("  |  ")
                             append("时长: ${formatDurationHMS(effectiveDuration)}")
@@ -212,7 +266,9 @@ fun SaveOptionsSheet(
                                 trimStartMs = trimStartMs,
                                 trimEndMs = trimEndMs,
                                 resolution = selectedResolution,
-                                compressionLevel = selectedCompression
+                                compressionLevel = selectedCompression,
+                                muteAudio = muteAudio,
+                                fps = selectedFps
                             )
                         )
                     },

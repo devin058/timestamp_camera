@@ -202,7 +202,11 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
 
     // ---- save with options -------------------------------------------------
 
-    fun saveWithOptions(options: SaveOptions, onComplete: (Uri, saveLocation: String) -> Unit) {
+    fun saveWithOptions(
+        options: SaveOptions,
+        onSuccess: (Uri, saveLocation: String) -> Unit,
+        onError: ((String) -> Unit)? = null
+    ) {
         val state = _uiState.value
         _uiState.update { it.copy(isProcessing = true, processingProgress = 0f) }
 
@@ -212,18 +216,19 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
                     state.lastPhoto != null -> {
                         val finalUri = savePhoto(state.lastPhoto, options)
                         _uiState.update { it.copy(isProcessing = false, lastPhoto = null) }
-                        onComplete(finalUri, MediaStoreSaver.getPhotoSaveLocationLabel())
+                        onSuccess(finalUri, MediaStoreSaver.getPhotoSaveLocationLabel())
                     }
                     state.lastVideo != null -> {
                         val finalUri = saveVideo(state.lastVideo, options)
                         _uiState.update { it.copy(isProcessing = false, lastVideo = null) }
-                        onComplete(finalUri, MediaStoreSaver.getVideoSaveLocationLabel())
+                        onSuccess(finalUri, MediaStoreSaver.getVideoSaveLocationLabel())
                     }
                 }
             } catch (e: Exception) {
-                _uiState.update {
-                    it.copy(isProcessing = false, errorMessage = e.message ?: "保存失败")
-                }
+                val msg = e.message ?: "保存失败"
+                android.util.Log.e("CameraViewModel", "Save failed", e)
+                _uiState.update { it.copy(isProcessing = false, errorMessage = msg) }
+                onError?.invoke(msg)
             }
         }
     }
@@ -270,7 +275,9 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
                 trimStartMs = options.trimStartMs,
                 trimEndMs = if (options.trimEndMs > 0) options.trimEndMs else video.durationMs,
                 overlayTimestampMs = videoRecordingStartWallTimeMs,
-                videoStartWallTimeMs = videoRecordingStartWallTimeMs
+                videoStartWallTimeMs = videoRecordingStartWallTimeMs,
+                muteAudio = options.muteAudio,
+                fps = options.fps
             ),
             onProgress = { progress ->
                 _uiState.update { it.copy(processingProgress = progress) }
