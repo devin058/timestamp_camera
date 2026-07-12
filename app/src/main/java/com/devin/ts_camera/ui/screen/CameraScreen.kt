@@ -21,6 +21,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
 import androidx.compose.runtime.collectAsState
@@ -41,6 +42,7 @@ fun CameraScreen(
     val uiState by viewModel.uiState.collectAsState()
     val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
+    var showSettings by remember { mutableStateOf(false) }
 
     // Keep screen on only during video recording; allow timeout otherwise
     DisposableEffect(uiState.isRecording) {
@@ -68,6 +70,7 @@ fun CameraScreen(
             it.add(Manifest.permission.ACCESS_FINE_LOCATION)
             if (android.os.Build.VERSION.SDK_INT >= 33) {
                 it.add(Manifest.permission.ACCESS_MEDIA_LOCATION)
+                it.add(Manifest.permission.POST_NOTIFICATIONS)
             }
         }.toTypedArray()
     }
@@ -184,6 +187,16 @@ fun CameraScreen(
             onModeChange = { viewModel.setCaptureMode(it) },
             modifier = Modifier.align(Alignment.TopCenter)
         )
+
+        // Settings button (bottom-left, away from other controls)
+        IconButton(
+            onClick = { showSettings = true },
+            modifier = Modifier
+                .align(Alignment.BottomStart)
+                .padding(bottom = 120.dp, start = 12.dp)
+        ) {
+            Text("⚙", color = Color.White.copy(alpha = 0.5f), fontSize = 26.sp)
+        }
 
         // Recording indicator (video only)
         if (uiState.isRecording) {
@@ -316,11 +329,16 @@ fun CameraScreen(
             }
         }
 
-        // Navigate to preview when capture completes
-        LaunchedEffect(uiState.lastPhoto, uiState.lastVideo) {
-            if (uiState.hasPendingResult && !uiState.isRecording) {
+        // Navigate to preview for PHOTOS only; videos are processed in background
+        LaunchedEffect(uiState.lastPhoto) {
+            if (uiState.lastPhoto != null && !uiState.isRecording) {
                 onNavigateToPreview()
             }
+        }
+
+        // Settings bottom sheet
+        if (showSettings) {
+            SettingsSheet(onDismiss = { showSettings = false })
         }
     }
 }

@@ -110,18 +110,22 @@ object VideoProcessor {
 
         Log.d(TAG, "FFmpeg: $cmd")
 
-        // —— Execute (async so we can track progress) ——
-        val session = FFmpegKit.executeAsync(cmd) { }
+        // —— Execute (async with progress via StatisticsCallback) ——
+        val progressLock = Object()
+        var lastProgressMs = 0.0
+        val session = FFmpegKit.executeAsync(cmd, { }, { }, { stats ->
+            synchronized(progressLock) {
+                lastProgressMs = stats.time
+            }
+        })
         try {
-            // Wait until FFmpeg actually finishes (CREATED → RUNNING → COMPLETED/FAILED)
+            // Poll progress until FFmpeg finishes
             while (session.state != SessionState.COMPLETED
                 && session.state != SessionState.FAILED
             ) {
-                val out = session.output ?: ""
-                val m = Regex("time=([0-9:.]+)").find(out)
-                if (m != null && effectiveDurationMs > 0) {
-                    val t = parseTimeToMs(m.groupValues[1])
-                    onProgress((t.toFloat() / effectiveDurationMs).coerceIn(0f, 0.99f))
+                val currentMs = synchronized(progressLock) { lastProgressMs }
+                if (currentMs > 0.0 && effectiveDurationMs > 0) {
+                    onProgress((currentMs.toFloat() / effectiveDurationMs).coerceIn(0f, 0.99f))
                 }
                 kotlinx.coroutines.delay(200L)
             }
@@ -176,9 +180,10 @@ object VideoProcessor {
             append("-r $fps ")
         }
 
-        // Video codec — software mpeg4 (native, always available)
-        append("-c:v mpeg4 -q:v ${when (compression) {
-            CompressionLevel.HIGH -> "8"; CompressionLevel.MEDIUM -> "5"; CompressionLevel.LOW -> "3"
+        // Video codec — software mpeg4 (most compatible)
+        append("-c:v mpeg4 ")
+        append("-q:v ${when (compression) {
+            CompressionLevel.HIGH -> "10"; CompressionLevel.MEDIUM -> "7"; CompressionLevel.LOW -> "5"
         }} ")
 
         // Audio

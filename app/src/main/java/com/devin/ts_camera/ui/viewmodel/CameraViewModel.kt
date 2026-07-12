@@ -3,6 +3,7 @@ package com.devin.ts_camera.ui.viewmodel
 import android.app.Application
 import android.net.Uri
 import android.os.SystemClock
+import android.widget.Toast
 import androidx.camera.view.PreviewView
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.LifecycleOwner
@@ -40,10 +41,19 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
 
     private var captureSequence = 0
 
+    private var locationJob: Job? = null
+
     init {
+        // Start location tracking once permission is granted
         viewModelScope.launch {
-            locationProvider.location.collect { loc ->
-                _uiState.update { it.copy(location = loc) }
+            _uiState.collect { state ->
+                if (state.hasLocationPermission && locationJob == null) {
+                    locationJob = viewModelScope.launch {
+                        locationProvider.location.collect { loc ->
+                            _uiState.update { it.copy(location = loc) }
+                        }
+                    }
+                }
             }
         }
     }
@@ -148,22 +158,30 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
             },
             onComplete = { videoFile ->
                 recordingTimerJob?.cancel()
+                val app = getApplication<Application>()
                 val durationMs = SystemClock.elapsedRealtime() - recordingStartTimeMs
-                val result = VideoResult(
-                    uri = Uri.fromFile(videoFile),
-                    file = videoFile,
-                    durationMs = durationMs,
-                    timestamp = System.currentTimeMillis(),
-                    location = _uiState.value.location
+
+                android.util.Log.d("CameraViewModel", "Video done: file=${videoFile.absolutePath}, size=${videoFile.length()}, dur=${durationMs}ms, startWall=$videoRecordingStartWallTimeMs")
+
+                // Start background processing service (no preview for videos)
+                com.devin.ts_camera.media.VideoProcessingService.start(
+                    app,
+                    inputUri = Uri.fromFile(videoFile),
+                    startWallTimeMs = videoRecordingStartWallTimeMs,
+                    durationMs = durationMs
                 )
+                android.util.Log.d("CameraViewModel", "Service start() called")
+
                 _uiState.update {
                     it.copy(
                         isRecording = false,
                         recordingDurationMs = durationMs,
-                        lastVideo = result,
                         lastPhoto = null
+                        // lastVideo is NOT set — no preview for videos
                     )
                 }
+
+                Toast.makeText(app, "视频后台处理中…", Toast.LENGTH_SHORT).show()
             },
             onError = { msg ->
                 recordingTimerJob?.cancel()
