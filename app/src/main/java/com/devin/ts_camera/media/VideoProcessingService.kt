@@ -18,10 +18,12 @@ import com.devin.ts_camera.model.CompressionLevel
 import com.devin.ts_camera.model.VideoResolution
 import kotlinx.coroutines.*
 import java.io.File
+import java.util.Collections
+import java.util.LinkedList
 
 /**
- * Foreground service that processes video via FFmpeg in the background
- * while showing a notification with a progress bar.
+ * Foreground service that processes videos sequentially via FFmpeg.
+ * New recordings are queued if a job is already running.
  */
 class VideoProcessingService : Service() {
 
@@ -33,22 +35,37 @@ class VideoProcessingService : Service() {
         const val EXTRA_START_TIME_MS = "start_time_ms"
         const val EXTRA_DURATION_MS = "duration_ms"
 
+        // ---- Job queue ----
+        data class VideoJob(
+            val inputUri: Uri,
+            val startWallTimeMs: Long,
+            val durationMs: Long
+        )
+
+        private val pendingJobs = Collections.synchronizedList(LinkedList<VideoJob>())
+        @Volatile private var isProcessing = false
+        private var activeService: VideoProcessingService? = null
+
         fun start(
             context: Context,
             inputUri: Uri,
             startWallTimeMs: Long,
             durationMs: Long
         ) {
-            val intent = Intent(context, VideoProcessingService::class.java).apply {
-                putExtra(EXTRA_INPUT_URI, inputUri.toString())
-                putExtra(EXTRA_START_TIME_MS, startWallTimeMs)
-                putExtra(EXTRA_DURATION_MS, durationMs)
+            val job = VideoJob(inputUri, startWallTimeMs, durationMs)
+            val alreadyRunning: Boolean = synchronized(pendingJobs) {
+                pendingJobs.add(job)
+                isProcessing
             }
+
+            val intent = Intent(context, VideoProcessingService::class.java)
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
                 context.startForegroundService(intent)
             } else {
                 context.startService(intent)
             }
+
+            Log.d(TAG, "Job queued. alreadyRunning=$alreadyRunning, queueSize=${pendingJobs.size}")
         }
 
         private fun createChannel(context: Context) {
@@ -71,73 +88,13 @@ class VideoProcessingService : Service() {
     override fun onCreate() {
         super.onCreate()
         createChannel(this)
+        activeService = this
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        Log.d(TAG, "Service onStartCommand")
-        val inputUriStr = intent?.getStringExtra(EXTRA_INPUT_URI) ?: run {
-            Log.e(TAG, "No input URI in intent")
-            return START_NOT_STICKY
+        if (!isProcessing) {
+            processNext()
         }
-        val startWallTimeMs = intent.getLongExtra(EXTRA_START_TIME_MS, 0L)
-        val durationMs = intent.getLongExtra(EXTRA_DURATION_MS, 0L)
-        Log.d(TAG, "Processing: uri=$inputUriStr, startMs=$startWallTimeMs, durMs=$durationMs")
-
-        val inputUri = Uri.parse(inputUriStr)
-        val outputFile = File.createTempFile("VID_", ".mp4", cacheDir)
-
-        // Read settings
-        val resolution = SettingsManager.getResolution(this)
-        val compression = SettingsManager.getCompression(this)
-        val mute = SettingsManager.isMuted(this)
-        val fps = SettingsManager.getFps(this)
-        Log.d(TAG, "Settings: res=$resolution, comp=$compression, mute=$mute, fps=$fps")
-
-        startForeground(NOTIFY_ID, buildNotification(0))
-        Log.d(TAG, "Foreground started, beginning transcode")
-
-        serviceScope.launch {
-            try {
-                VideoProcessor.transcode(
-                    context = this@VideoProcessingService,
-                    params = VideoProcessor.TranscodeParams(
-                        inputUri = inputUri,
-                        outputFile = outputFile,
-                        resolution = resolution,
-                        compressionLevel = compression,
-                        muteAudio = mute,
-                        fps = fps,
-                        overlayTimestampMs = startWallTimeMs,
-                        videoStartWallTimeMs = startWallTimeMs
-                    ),
-                    onProgress = { progress ->
-                        Log.d(TAG, "Progress: ${(progress * 100).toInt()}%")
-                        updateNotification(progress)
-                    }
-                )
-                Log.d(TAG, "Transcode done, saving to MediaStore, size=${outputFile.length()}")
-
-                // Save to MediaStore
-                val displayName = "VID_${System.currentTimeMillis()}.mp4"
-                val uri = MediaStoreSaver.saveVideo(
-                    this@VideoProcessingService,
-                    outputFile,
-                    displayName
-                )
-                Log.d(TAG, "Saved to MediaStore: $uri")
-                outputFile.delete()
-
-                showDoneNotification(true)
-            } catch (e: Exception) {
-                Log.e(TAG, "Processing failed", e)
-                try { outputFile.delete() } catch (_: Exception) {}
-                showDoneNotification(false)
-            } finally {
-                stopForeground(STOP_FOREGROUND_DETACH)
-                stopSelf()
-            }
-        }
-
         return START_NOT_STICKY
     }
 
@@ -145,19 +102,97 @@ class VideoProcessingService : Service() {
 
     override fun onDestroy() {
         serviceScope.cancel()
+        activeService = null
         super.onDestroy()
     }
 
-    private fun buildNotification(progress: Int): Notification {
+    // ---- Queue processor ----
+
+    private fun processNext() {
+        val job: VideoJob? = synchronized(pendingJobs) {
+            if (pendingJobs.isEmpty()) {
+                isProcessing = false
+                null
+            } else {
+                isProcessing = true
+                pendingJobs.removeAt(0)
+            }
+        }
+
+        if (job == null) {
+            Log.d(TAG, "Queue empty, stopping service")
+            stopForeground(STOP_FOREGROUND_REMOVE)
+            stopSelf()
+            return
+        }
+
+        startForeground(NOTIFY_ID, buildNotification(0, pendingJobs.size))
+        lastNotifiedPct = -1
+
+        val outputFile = File.createTempFile("VID_", ".mp4", cacheDir)
+
+        // Read settings
+        val resolution = SettingsManager.getResolution(this)
+        val compression = SettingsManager.getCompression(this)
+        val mute = SettingsManager.isMuted(this)
+        val fps = SettingsManager.getFps(this)
+        Log.d(TAG, "Processing job: uri=${job.inputUri}, dur=${job.durationMs}ms, res=$resolution, mute=$mute, fps=$fps, queueRemaining=${pendingJobs.size}")
+
+        serviceScope.launch {
+            try {
+                VideoProcessor.transcode(
+                    context = this@VideoProcessingService,
+                    params = VideoProcessor.TranscodeParams(
+                        inputUri = job.inputUri,
+                        outputFile = outputFile,
+                        resolution = resolution,
+                        compressionLevel = compression,
+                        muteAudio = mute,
+                        fps = fps,
+                        overlayTimestampMs = job.startWallTimeMs,
+                        videoStartWallTimeMs = job.startWallTimeMs
+                    ),
+                    onProgress = { progress ->
+                        updateNotification(progress, pendingJobs.size)
+                    }
+                )
+                Log.d(TAG, "Transcode done, size=${outputFile.length()}")
+
+                // Save to MediaStore
+                val displayName = "VID_${System.currentTimeMillis()}.mp4"
+                val uri = MediaStoreSaver.saveVideo(this@VideoProcessingService, outputFile, displayName)
+                Log.d(TAG, "Saved: $uri")
+                outputFile.delete()
+
+                // Delete original
+                try {
+                    File(job.inputUri.path!!).let { if (it.exists()) it.delete() }
+                } catch (_: Exception) {}
+            } catch (e: Exception) {
+                Log.e(TAG, "Processing failed", e)
+                try { outputFile.delete() } catch (_: Exception) {}
+            } finally {
+                // Process next job in queue
+                processNext()
+            }
+        }
+    }
+
+    // ---- Notifications ----
+
+    private var lastNotifiedPct = -1
+
+    private fun buildNotification(progress: Int, queueSize: Int): Notification {
         val pendingIntent = PendingIntent.getActivity(
             this, 0,
             Intent(this, MainActivity::class.java),
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )
 
+        val queueText = if (queueSize > 0) " (+${queueSize}个排队)" else ""
         return NotificationCompat.Builder(this, CHANNEL_ID)
             .setContentTitle("TS Camera")
-            .setContentText(if (progress in 1..99) "处理中 $progress%" else "处理中…")
+            .setContentText(if (progress in 1..99) "处理中 $progress%$queueText" else "处理中…$queueText")
             .setSmallIcon(R.drawable.app_icon)
             .setOngoing(true)
             .setProgress(100, progress, false)
@@ -167,38 +202,12 @@ class VideoProcessingService : Service() {
             .build()
     }
 
-    private var lastNotifiedPct = -1
-
-    private fun updateNotification(progress: Float) {
+    private fun updateNotification(progress: Float, queueSize: Int) {
         val pct = (progress * 100).toInt().coerceIn(0, 100)
-        // Throttle: notify at most once per 5% change to avoid Android rate-limiting
-        if (pct == lastNotifiedPct || pct == 100) return
-        if (pct % 5 != 0 && pct - lastNotifiedPct < 5) return
+        if (pct == lastNotifiedPct) return
+        if (pct != 100 && pct % 5 != 0 && pct - lastNotifiedPct < 5) return
         lastNotifiedPct = pct
-        val nm = getSystemService(NotificationManager::class.java)
-        nm.notify(NOTIFY_ID, buildNotification(pct))
-        Log.d(TAG, "Notify: $pct%")
-    }
-
-    private fun showDoneNotification(success: Boolean) {
-        val pendingIntent = PendingIntent.getActivity(
-            this, 0,
-            Intent(this, MainActivity::class.java),
-            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
-        )
-
-        val nm = getSystemService(NotificationManager::class.java)
-        // Remove progress notification
-        nm.cancel(NOTIFY_ID)
-
-        val notification = NotificationCompat.Builder(this, CHANNEL_ID)
-            .setContentTitle(if (success) "视频已保存" else "处理失败")
-            .setContentText(if (success) "点击返回应用" else "请重试")
-            .setSmallIcon(R.drawable.app_icon)
-            .setAutoCancel(true)
-            .setContentIntent(pendingIntent)
-            .build()
-
-        nm.notify(NOTIFY_ID, notification)
+        getSystemService(NotificationManager::class.java)
+            .notify(NOTIFY_ID, buildNotification(pct, queueSize))
     }
 }

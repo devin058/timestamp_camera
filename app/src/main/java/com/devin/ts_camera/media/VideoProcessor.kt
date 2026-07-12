@@ -180,7 +180,7 @@ object VideoProcessor {
             append("-r $fps ")
         }
 
-        // Video codec — software mpeg4 (most compatible)
+        // Video codec — software mpeg4
         append("-c:v mpeg4 ")
         append("-q:v ${when (compression) {
             CompressionLevel.HIGH -> "10"; CompressionLevel.MEDIUM -> "7"; CompressionLevel.LOW -> "5"

@@ -14,7 +14,6 @@ object SettingsManager {
     private const val KEY_COMPRESSION = "compression"
     private const val KEY_MUTE = "mute"
     private const val KEY_FPS = "fps"
-
     fun getResolution(ctx: Context): VideoResolution {
         val name = ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
             .getString(KEY_RESOLUTION, null)
@@ -54,4 +53,5 @@ object SettingsManager {
         ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
             .edit().putInt(KEY_FPS, fps).apply()
     }
+
 }
