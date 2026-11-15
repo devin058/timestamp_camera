@@ -161,7 +161,25 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
                 val app = getApplication<Application>()
                 val durationMs = SystemClock.elapsedRealtime() - recordingStartTimeMs
 
-                android.util.Log.d("CameraViewModel", "Video done: file=${videoFile.absolutePath}, size=${videoFile.length()}, dur=${durationMs}ms, startWall=$videoRecordingStartWallTimeMs")
+                // The recorder can finalize a file that is missing or empty on
+                // failure paths; queueing it would just log a confusing error
+                // later. Surface it now instead.
+                if (!videoFile.exists() || videoFile.length() == 0L) {
+                    android.util.Log.e(
+                        "CameraViewModel",
+                        "Recorder produced no data: ${videoFile.absolutePath}"
+                    )
+                    _uiState.update {
+                        it.copy(isRecording = false, errorMessage = "录像文件为空，请重试")
+                    }
+                    return@startRecording
+                }
+
+                android.util.Log.d(
+                    "CameraViewModel",
+                    "Video done: file=${videoFile.absolutePath}, size=${videoFile.length()}, " +
+                            "dur=${durationMs}ms, startWall=$videoRecordingStartWallTimeMs"
+                )
 
                 // Start background processing service (no preview for videos)
                 com.devin.ts_camera.media.VideoProcessingService.start(
@@ -170,7 +188,6 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
                     startWallTimeMs = videoRecordingStartWallTimeMs,
                     durationMs = durationMs
                 )
-                android.util.Log.d("CameraViewModel", "Service start() called")
 
                 _uiState.update {
                     it.copy(
@@ -292,7 +309,6 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
                 compressionLevel = options.compressionLevel,
                 trimStartMs = options.trimStartMs,
                 trimEndMs = if (options.trimEndMs > 0) options.trimEndMs else video.durationMs,
-                overlayTimestampMs = videoRecordingStartWallTimeMs,
                 videoStartWallTimeMs = videoRecordingStartWallTimeMs,
                 muteAudio = options.muteAudio,
                 fps = options.fps

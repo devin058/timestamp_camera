@@ -38,12 +38,12 @@ object MediaStoreSaver {
     suspend fun savePhoto(
         context: Context,
         sourceFile: File,
-        displayName: String  // without extension, e.g. "IMG_20260706_120001_1"
+        displayName: String  // e.g. "IMG_20260706_120001_1", with or without .jpg
     ): Uri = withContext(Dispatchers.IO) {
         insertToMediaStore(
             context = context,
             sourceFile = sourceFile,
-            displayName = "$displayName.jpg",
+            displayName = withExtension(displayName, ".jpg"),
             mimeType = "image/jpeg",
             relativePath = PHOTO_RELATIVE_PATH,
             externalPublicDir = Environment.DIRECTORY_PICTURES,
@@ -57,18 +57,27 @@ object MediaStoreSaver {
     suspend fun saveVideo(
         context: Context,
         sourceFile: File,
-        displayName: String  // without extension, e.g. "VID_20260706_120001_1"
+        displayName: String  // e.g. "VID_20260706_120001_1", with or without .mp4
     ): Uri = withContext(Dispatchers.IO) {
         insertToMediaStore(
             context = context,
             sourceFile = sourceFile,
-            displayName = "$displayName.mp4",
+            displayName = withExtension(displayName, ".mp4"),
             mimeType = "video/mp4",
             relativePath = VIDEO_RELATIVE_PATH,
             externalPublicDir = Environment.DIRECTORY_MOVIES,
             mediaCollectionUri = MediaStore.Video.Media.EXTERNAL_CONTENT_URI
         )
     }
+
+    /**
+     * Appends [extension] unless the name already ends with it.
+     *
+     * Callers pass bare names ("VID_123"), but some already include the
+     * suffix; appending unconditionally produced "VID_123.mp4.mp4".
+     */
+    private fun withExtension(name: String, extension: String): String =
+        if (name.endsWith(extension, ignoreCase = true)) name else name + extension
 
     // ---- Private implementation --------------------------------------------
 

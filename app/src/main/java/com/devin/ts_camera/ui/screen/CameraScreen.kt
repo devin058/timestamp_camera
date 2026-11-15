@@ -9,6 +9,7 @@ import androidx.camera.view.PreviewView
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectDragGestures
+import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material3.*
@@ -56,6 +57,23 @@ fun CameraScreen(
             activity?.window?.clearFlags(
                 android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON
             )
+        }
+    }
+
+    // ---- Power-save dim during long recordings -----------------------
+    // After 2 min the screen goes black to save power. Tapping while dimmed
+    // only wakes the screen — it must not also hit whatever control the
+    // user happened to tap, or they can't stop the recording.
+
+    val dimThresholdMs = 120_000L
+    var isDimmed by remember { mutableStateOf(false) }
+
+    LaunchedEffect(uiState.isRecording) {
+        if (!uiState.isRecording) isDimmed = false
+    }
+    LaunchedEffect(uiState.isRecording, uiState.recordingDurationMs, isDimmed) {
+        if (uiState.isRecording && !isDimmed && uiState.recordingDurationMs >= dimThresholdMs) {
+            isDimmed = true
         }
     }
 
@@ -246,33 +264,18 @@ fun CameraScreen(
         }
 
         // ---- Power-save dim during long recordings -----------------------
-        // After 2 min, dim screen. Tap to wake for 30 s, then re-dim.
 
-        val dimThresholdMs = 120_000L
-        val wakeTimeoutMs = 30_000L
-        var lastWakeMs by remember { mutableStateOf(0L) }
-        var isDimmed by remember { mutableStateOf(false) }
-
-        LaunchedEffect(uiState.isRecording, uiState.recordingDurationMs) {
-            if (!uiState.isRecording) {
-                isDimmed = false
-            } else if (!isDimmed
-                && uiState.recordingDurationMs >= dimThresholdMs
-                && System.currentTimeMillis() - lastWakeMs >= wakeTimeoutMs
-            ) {
-                isDimmed = true
-            }
-        }
-
-        if (isDimmed) {
+        if (isDimmed && uiState.isRecording) {
+            // Full-screen scrim that swallows the tap — waking the screen must
+            // not also press the capture button underneath.
             Box(
                 modifier = Modifier
                     .fillMaxSize()
                     .background(Color.Black)
-                    .clickable {
-                        lastWakeMs = System.currentTimeMillis()
-                        isDimmed = false
-                    },
+                    .clickable(
+                        interactionSource = remember { MutableInteractionSource() },
+                        indication = null
+                    ) { isDimmed = false },
                 contentAlignment = Alignment.Center
             ) {
                 Column(horizontalAlignment = Alignment.CenterHorizontally) {
