@@ -106,9 +106,7 @@ fun PreviewScreen(
                 ?: uiState.lastVideo?.location
             if (location != null && location.isValid()) {
                 Text(
-                    text = "📍 %.6f, %.6f".format(
-                        location.latitude, location.longitude
-                    ),
+                    text = "📍 ${location.toDisplayString()}",
                     color = Color.White.copy(alpha = 0.85f),
                     style = MaterialTheme.typography.bodySmall
                 )

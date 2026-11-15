@@ -7,6 +7,7 @@ import android.app.PendingIntent
 import android.app.Service
 import android.content.Context
 import android.content.Intent
+import android.location.LocationManager
 import android.net.Uri
 import android.os.Build
 import android.os.IBinder
@@ -15,6 +16,8 @@ import android.util.Log
 import androidx.core.app.NotificationCompat
 import com.devin.ts_camera.MainActivity
 import com.devin.ts_camera.R
+import com.devin.ts_camera.location.ReverseGeocoder
+import com.google.android.gms.location.LocationServices
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -22,7 +25,10 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancelChildren
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.suspendCancellableCoroutine
 import java.io.File
+import java.util.concurrent.TimeUnit
+import kotlin.coroutines.resume
 
 /**
  * Foreground service that transcodes recorded videos one at a time.
@@ -233,6 +239,15 @@ class VideoProcessingService : Service() {
             val savedUri = MediaStoreSaver.saveVideo(this, outputFile, displayName)
             Log.d(TAG, "Saved $savedUri")
 
+            RecordingHistory.add(
+                context = this,
+                uri = savedUri,
+                displayName = displayName,
+                durationMs = job.durationMs,
+                sizeBytes = outputFile.length(),
+                address = reverseGeocode(job)
+            )
+
             JobStore.remove(this, job.id)
             source.delete()
         } catch (e: CancellationException) {
@@ -279,6 +294,41 @@ class VideoProcessingService : Service() {
         File(job.inputPath).delete()
         return true
     }
+
+    /**
+     * Best-effort address for a finished recording.
+     *
+     * The service has no stored fix, so it reads the device's last known
+     * location and resolves it. Failure just means the history entry shows
+     * the time without an address.
+     */
+    private suspend fun reverseGeocode(job: VideoJob): String? {
+        val location = try {
+            LocationServices.getFusedLocationProviderClient(this)
+                .lastLocation
+                .awaitOrNull()
+        } catch (e: SecurityException) {
+            Log.d(TAG, "No location permission for reverse geocoding")
+            return null
+        } catch (e: Exception) {
+            Log.d(TAG, "Could not read last location: ${e.message}")
+            return null
+        }
+
+        return if (location == null) {
+            null
+        } else {
+            ReverseGeocoder.lookup(location.latitude, location.longitude)
+        }
+    }
+
+    /** Bridges a Play Services Task into a suspend call without extra deps. */
+    private suspend fun <T> com.google.android.gms.tasks.Task<T>.awaitOrNull(): T? =
+        suspendCancellableCoroutine { cont ->
+            addOnSuccessListener { cont.resume(it) }
+            addOnFailureListener { cont.resume(null) }
+            addOnCanceledListener { cont.cancel() }
+        }
 
     private fun quarantine(source: File, jobId: Long): File? = try {
         val dir = File(getExternalFilesDir(null), "recovered")

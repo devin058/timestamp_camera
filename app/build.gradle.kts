@@ -43,6 +43,13 @@ android {
     buildFeatures {
         compose = true
     }
+    testOptions {
+        unitTests {
+            // android.util.Log and JSONObject are stubs in unit tests; without
+            // this every call throws "Method not mocked".
+            isReturnDefaultValues = true
+        }
+    }
     packaging {
         jniLibs {
             useLegacyPackaging = true
@@ -85,6 +92,8 @@ dependencies {
     implementation(libs.androidx.exifinterface)
 
     testImplementation(libs.junit)
+    // Real org.json for JVM tests — the android.jar stub returns nulls.
+    testImplementation(libs.json)
     androidTestImplementation(libs.androidx.junit)
     androidTestImplementation(libs.androidx.espresso.core)
     androidTestImplementation(platform(libs.androidx.compose.bom))
