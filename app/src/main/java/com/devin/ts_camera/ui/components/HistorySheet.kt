@@ -19,8 +19,10 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import coil.compose.AsyncImage
+import com.devin.ts_camera.media.JobState
 import com.devin.ts_camera.media.RecordingEntry
 import com.devin.ts_camera.media.RecordingHistory
+import kotlinx.coroutines.delay
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -38,7 +40,16 @@ fun HistorySheet(
     modifier: Modifier = Modifier
 ) {
     val context = LocalContext.current
-    var entries by remember { mutableStateOf(RecordingHistory.all(context)) }
+    var entries by remember { mutableStateOf(RecordingHistory.allWithPending(context)) }
+
+    // Pending rows change while the sheet is open — jobs finish and new ones
+    // are queued — so refresh while it is visible.
+    LaunchedEffect(Unit) {
+        while (true) {
+            delay(REFRESH_INTERVAL_MS)
+            entries = RecordingHistory.allWithPending(context)
+        }
+    }
 
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
 
@@ -64,7 +75,7 @@ fun HistorySheet(
                     TextButton(
                         onClick = {
                             RecordingHistory.clear(context)
-                            entries = emptyList()
+                            entries = RecordingHistory.allWithPending(context)
                         }
                     ) {
                         Text("清空列表")
@@ -89,10 +100,18 @@ fun HistorySheet(
                 items(entries, key = { it.id }) { entry ->
                     HistoryRow(
                         entry = entry,
-                        onClick = { play(context, entry) },
+                        onClick = {
+                            // A pending entry has no MediaStore item yet, and
+                            // its file is being rewritten by FFmpeg.
+                            if (!entry.pending) play(context, entry)
+                        },
                         onDelete = {
-                            RecordingHistory.remove(context, entry.id)
-                            entries = RecordingHistory.all(context)
+                            // Pending rows are owned by the job queue, so they
+                            // can't be removed from here.
+                            if (!entry.pending) {
+                                RecordingHistory.remove(context, entry.id)
+                                entries = RecordingHistory.allWithPending(context)
+                            }
                         }
                     )
                 }
@@ -112,21 +131,35 @@ private fun HistoryRow(
             .fillMaxWidth()
             .clip(RoundedCornerShape(12.dp))
             .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.4f))
-            .clickable(onClick = onClick)
+            .clickable(enabled = !entry.pending, onClick = onClick)
             .padding(10.dp),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(12.dp)
     ) {
-        // Coil renders a video frame for a video URI.
-        AsyncImage(
-            model = entry.uri,
-            contentDescription = entry.displayName,
-            contentScale = ContentScale.Crop,
+        // Coil renders a video frame for a video URI. A pending file is still
+        // being written, so decoding it would be unreliable.
+        Box(
             modifier = Modifier
                 .size(72.dp)
                 .clip(RoundedCornerShape(8.dp))
-                .background(Color.Black)
-        )
+                .background(Color.Black),
+            contentAlignment = Alignment.Center
+        ) {
+            if (entry.pending) {
+                CircularProgressIndicator(
+                    modifier = Modifier.size(24.dp),
+                    strokeWidth = 2.dp,
+                    color = Color.White
+                )
+            } else {
+                AsyncImage(
+                    model = entry.uri,
+                    contentDescription = entry.displayName,
+                    contentScale = ContentScale.Crop,
+                    modifier = Modifier.fillMaxSize()
+                )
+            }
+        }
 
         Column(modifier = Modifier.weight(1f)) {
             Text(
@@ -141,7 +174,16 @@ private fun HistoryRow(
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
-            entry.address?.let {
+            if (entry.pending) {
+                Spacer(Modifier.height(2.dp))
+                Text(
+                    text = "⏳ 处理中…",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.primary,
+                    fontWeight = FontWeight.SemiBold
+                )
+            }
+            entry.address?.takeIf { !entry.pending }?.let {
                 Spacer(Modifier.height(2.dp))
                 Text(
                     text = "📍 $it",
@@ -152,14 +194,17 @@ private fun HistoryRow(
             }
         }
 
-        TextButton(onClick = onDelete) {
-            Text("删除", style = MaterialTheme.typography.labelSmall)
+        if (!entry.pending) {
+            TextButton(onClick = onDelete) {
+                Text("删除", style = MaterialTheme.typography.labelSmall)
+            }
         }
     }
 }
 
-private fun play(context: android.content.Context, entry: RecordingEntry) {
-    try {
+private const val REFRESH_INTERVAL_MS = 2_000L
+
+private fun play(context: android.content.Context, entry: RecordingEntry) {    try {
         val intent = Intent(Intent.ACTION_VIEW).apply {
             setDataAndType(Uri.parse(entry.uri), "video/mp4")
             addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)

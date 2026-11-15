@@ -8,12 +8,15 @@ import org.json.JSONObject
 import java.io.File
 
 /**
- * One processed recording, as shown in the history sheet.
+ * One row in the history sheet: either a finished recording or one still
+ * being processed.
  *
- * @param uri the MediaStore entry, or a file URI as a fallback
+ * @param uri the MediaStore entry, or the raw file while processing
  * @param durationMs recorded length in milliseconds
- * @param savedAt when the transcode finished
+ * @param savedAt when the transcode finished, or when it was recorded if the
+ *        entry is still pending
  * @param address reverse-geocoded location, when one was available
+ * @param pending true while the recording is still being transcoded
  */
 data class RecordingEntry(
     val id: Long,
@@ -22,7 +25,8 @@ data class RecordingEntry(
     val durationMs: Long,
     val savedAt: Long,
     val sizeBytes: Long,
-    val address: String? = null
+    val address: String? = null,
+    val pending: Boolean = false
 )
 
 /**
@@ -47,6 +51,36 @@ object RecordingHistory {
     /** Newest first. */
     fun all(context: Context): List<RecordingEntry> = synchronized(lock) {
         read(context).sortedByDescending { it.savedAt }
+    }
+
+    /**
+     * Finished recordings plus anything still queued or encoding, newest
+     * first.
+     *
+     * Pending entries live in [JobStore] rather than this log — a job is only
+     * written here once it reaches MediaStore — but the sheet should show
+     * them so a long take is visible while it is still being worked on.
+     *
+     * Pending rows use negative ids so they cannot collide with the stored
+     * ones, and are ordered by their start time.
+     */
+    fun allWithPending(context: Context): List<RecordingEntry> {
+        val finished = all(context)
+        val pending = JobStore.all(context)
+            .filter { it.state != JobState.FAILED }
+            .map { job ->
+                RecordingEntry(
+                    id = -job.id,
+                    uri = Uri.fromFile(File(job.inputPath)).toString(),
+                    displayName = "VID_${job.startWallTimeMs}",
+                    durationMs = job.durationMs,
+                    savedAt = job.startWallTimeMs,
+                    // The raw file is still on disk; show its current size.
+                    sizeBytes = File(job.inputPath).length(),
+                    pending = true
+                )
+            }
+        return (finished + pending).sortedByDescending { it.savedAt }
     }
 
     fun add(
