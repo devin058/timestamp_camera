@@ -212,10 +212,14 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
                     return@startRecording
                 }
 
+                // When the recorder stamped each frame already, the transcode
+                // pass must not composite a second timestamp on top of it.
+                val alreadyStamped = cameraController.isStampedDuringRecording
                 android.util.Log.d(
                     "CameraViewModel",
                     "Video done: file=${videoFile.absolutePath}, size=${videoFile.length()}, " +
-                            "dur=${durationMs}ms, startWall=$videoRecordingStartWallTimeMs"
+                            "dur=${durationMs}ms, startWall=$videoRecordingStartWallTimeMs, " +
+                            "stampedDuringRecording=$alreadyStamped"
                 )
 
                 // Start background processing service (no preview for videos)
@@ -223,7 +227,8 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
                     app,
                     inputUri = Uri.fromFile(videoFile),
                     startWallTimeMs = videoRecordingStartWallTimeMs,
-                    durationMs = durationMs
+                    durationMs = durationMs,
+                    alreadyStamped = alreadyStamped
                 )
 
                 _uiState.update {

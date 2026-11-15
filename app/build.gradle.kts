@@ -75,6 +75,8 @@ dependencies {
     implementation(libs.androidx.camera.lifecycle)
     implementation(libs.androidx.camera.view)
     implementation(libs.androidx.camera.video)
+    // OverlayEffect — burns the timestamp into frames while recording.
+    implementation(libs.androidx.camera.effects)
 
     // Location
     implementation(libs.play.services.location)

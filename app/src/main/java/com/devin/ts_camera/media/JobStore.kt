@@ -23,7 +23,12 @@ data class VideoJob(
     val startWallTimeMs: Long,
     val durationMs: Long,
     val attempts: Int = 0,
-    val state: JobState = JobState.PENDING
+    val state: JobState = JobState.PENDING,
+    /**
+     * True when the recorder already burned the timestamp into every frame,
+     * so the transcode pass must not add a second one.
+     */
+    val stampedDuringRecording: Boolean = false
 )
 
 /**
@@ -59,7 +64,8 @@ object JobStore {
         context: Context,
         inputPath: String,
         startWallTimeMs: Long,
-        durationMs: Long
+        durationMs: Long,
+        stampedDuringRecording: Boolean = false
     ): VideoJob = synchronized(lock) {
         val jobs = read(context).toMutableList()
         val id = (jobs.maxOfOrNull { it.id } ?: 0L) + 1L
@@ -67,7 +73,8 @@ object JobStore {
             id = id,
             inputPath = inputPath,
             startWallTimeMs = startWallTimeMs,
-            durationMs = durationMs
+            durationMs = durationMs,
+            stampedDuringRecording = stampedDuringRecording
         )
         jobs.add(job)
         write(context, jobs)
@@ -105,7 +112,8 @@ object JobStore {
                     attempts = o.optInt("attempts"),
                     state = runCatching {
                         JobState.valueOf(o.optString("state", JobState.PENDING.name))
-                    }.getOrDefault(JobState.PENDING)
+                    }.getOrDefault(JobState.PENDING),
+                    stampedDuringRecording = o.optBoolean("stampedDuringRecording", false)
                 )
             }
         } catch (e: Exception) {
@@ -125,6 +133,7 @@ object JobStore {
                     put("durationMs", job.durationMs)
                     put("attempts", job.attempts)
                     put("state", job.state.name)
+                    put("stampedDuringRecording", job.stampedDuringRecording)
                 }
             )
         }

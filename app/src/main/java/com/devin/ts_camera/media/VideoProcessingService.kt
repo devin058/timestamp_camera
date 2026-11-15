@@ -60,14 +60,16 @@ class VideoProcessingService : Service() {
             context: Context,
             inputUri: Uri,
             startWallTimeMs: Long,
-            durationMs: Long
+            durationMs: Long,
+            alreadyStamped: Boolean = false
         ) {
             appContext = context.applicationContext
             val job = JobStore.enqueue(
                 appContext,
                 inputPath = inputUri.path ?: error("视频路径无效"),
                 startWallTimeMs = startWallTimeMs,
-                durationMs = durationMs
+                durationMs = durationMs,
+                stampedDuringRecording = alreadyStamped
             )
             Log.d(TAG, "Enqueued job #${job.id} (${job.inputPath})")
 
@@ -213,7 +215,9 @@ class VideoProcessingService : Service() {
             compressionLevel = compression,
             muteAudio = mute,
             fps = fps,
-            videoStartWallTimeMs = job.startWallTimeMs
+            // Skip the overlay when the recorder already burned it in.
+            videoStartWallTimeMs =
+                if (job.stampedDuringRecording) 0L else job.startWallTimeMs
         )
 
         try {
