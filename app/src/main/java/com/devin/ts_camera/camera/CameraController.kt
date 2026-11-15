@@ -9,7 +9,10 @@ import androidx.camera.core.Preview
 import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.camera.view.PreviewView
 import androidx.camera.video.FileOutputOptions
+import androidx.camera.video.FallbackStrategy
 import androidx.camera.video.PendingRecording
+import androidx.camera.video.Quality
+import androidx.camera.video.QualitySelector
 import androidx.camera.video.Recorder
 import androidx.camera.video.Recording
 import androidx.camera.video.VideoCapture
@@ -226,6 +229,16 @@ class CameraController(private val context: Context) {
             .build()
 
         val r = Recorder.Builder()
+            // Without a quality selector the recorder happily writes whatever
+            // the sensor produces: a 53-minute take came out at 6.8 GB. The
+            // output is re-encoded to at most 1080p anyway, so capturing above
+            // that only costs disk and makes the transcode slower.
+            .setQualitySelector(
+                QualitySelector.fromOrderedList(
+                    listOf(Quality.FHD, Quality.HD, Quality.SD),
+                    FallbackStrategy.lowerQualityOrHigherThan(Quality.SD)
+                )
+            )
             .build()
         recorder = r
         videoCapture = VideoCapture.Builder(r)

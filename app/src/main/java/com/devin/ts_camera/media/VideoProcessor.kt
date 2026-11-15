@@ -32,8 +32,24 @@ object VideoProcessor {
 
     private const val TAG = "VideoProcessor"
 
-    /** Upper bound on a single encode; long enough for any real recording. */
-    private const val MAX_SESSION_MINUTES = 30L
+    /**
+     * How much wall-clock time one pass may spend per second of footage before
+     * the watchdog gives up. 3x realtime is comfortably above what hardware
+     * H.264 achieves even at 1080p with the overlay, so tripping it means
+     * something is genuinely wrong rather than merely slow.
+     */
+    private const val MAX_ENCODE_TO_SOURCE_RATIO = 3L
+
+    /** Floor so short clips still get room for encoder start-up. */
+    private const val MIN_SESSION_BUDGET_MS = 5 * 60 * 1000L
+
+    private fun sessionBudgetMs(mediaDurationMs: Long): Long =
+        (mediaDurationMs * MAX_ENCODE_TO_SOURCE_RATIO)
+            .coerceAtLeast(MIN_SESSION_BUDGET_MS)
+
+    /** Raised when an encode outlives its budget, so callers can tell this
+     *  apart from a codec that simply isn't supported. */
+    class TimeoutException(message: String) : IllegalStateException(message)
 
     fun getDurationMs(context: Context, uri: Uri): Long {
         val retriever = MediaMetadataRetriever()
@@ -196,6 +212,12 @@ object VideoProcessor {
             }
         } catch (e: CancellationException) {
             throw e
+        } catch (e: VideoProcessor.TimeoutException) {
+            // A timeout means the encode wedged, not that the encoder is
+            // unsupported. Retrying in software is several times slower and
+            // would almost certainly time out too, so surface it instead.
+            Log.e(TAG, "Encode exceeded its budget; not retrying in software", e)
+            throw e
         } catch (e: Exception) {
             // Only fall back if the failure came from the hardware attempt —
             // retrying software after software already failed just wastes time.
@@ -301,11 +323,12 @@ object VideoProcessor {
             }
         )
 
-        // Hardware encodes of a long video legitimately take minutes; the
-        // timeout only guards against a wedged process.
-        if (!finished.await(MAX_SESSION_MINUTES * 60L, TimeUnit.SECONDS)) {
+        // The budget scales with the footage so a long recording is never
+        // killed mid-encode just for being long.
+        val budgetMs = sessionBudgetMs(durationMs)
+        if (!finished.await(budgetMs, TimeUnit.MILLISECONDS)) {
             FFmpegKit.cancel(session.sessionId)
-            throw IllegalStateException("转码超时（${MAX_SESSION_MINUTES} 分钟）")
+            throw TimeoutException("转码超时（预算 ${budgetMs / 60_000} 分钟）")
         }
 
         if (exitCode == Int.MIN_VALUE) {

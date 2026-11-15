@@ -45,6 +45,9 @@ class VideoProcessingService : Service() {
         private const val NOTIFY_ID = 1001
         private const val MAX_ATTEMPTS = 2
 
+        /** Minimum gap between notification updates while a job runs. */
+        private const val NOTIFY_MIN_INTERVAL_MS = 1_000L
+
         /** Wakes the service when a job is enqueued or the app resumes. */
         private val kick = Channel<Unit>(Channel.CONFLATED)
 
@@ -190,6 +193,8 @@ class VideoProcessingService : Service() {
 
         JobStore.update(this, job.copy(state = JobState.RUNNING))
         lastNotifiedPct = -1
+        currentJobDurationMs = job.durationMs
+        currentJobStartedAt = System.currentTimeMillis()
         notifyProgress(0f)
 
         val resolution = SettingsManager.getResolution(this)
@@ -353,7 +358,13 @@ class VideoProcessingService : Service() {
         val pm = getSystemService(POWER_SERVICE) as PowerManager
         wakeLock = pm.newWakeLock(
             PowerManager.PARTIAL_WAKE_LOCK, "TS_camera:processing"
-        ).apply { setReferenceCounted(false); acquire(30 * 60 * 1000L) }
+        ).apply {
+            setReferenceCounted(false)
+            // Not time-boxed: a long recording legitimately needs well over an
+            // hour, and a lapsed lock would let the CPU sleep mid-encode. The
+            // service releases this explicitly when the queue drains.
+            acquire()
+        }
     }
 
     private fun releaseWakeLock() {
@@ -363,6 +374,10 @@ class VideoProcessingService : Service() {
 
     // ---- Notifications ----------------------------------------------------
 
+    /** Non-null while a job is encoding, so the notification can show ETA. */
+    private var currentJobDurationMs = 0L
+    private var currentJobStartedAt = 0L
+
     private fun buildNotification(progress: Int, queueSize: Int): Notification {
         val pendingIntent = PendingIntent.getActivity(
             this, 0,
@@ -371,10 +386,12 @@ class VideoProcessingService : Service() {
         )
 
         val queueText = if (queueSize > 0) " (+${queueSize}个排队)" else ""
+        val etaText = remainingText(progress)
         return NotificationCompat.Builder(this, CHANNEL_ID)
             .setContentTitle("TS Camera")
             .setContentText(
-                if (progress in 1..99) "处理中 $progress%$queueText" else "处理中…$queueText"
+                if (progress in 1..99) "处理中 $progress%$etaText$queueText"
+                else "处理中…$queueText"
             )
             .setSmallIcon(R.drawable.app_icon)
             .setOngoing(true)
@@ -385,11 +402,37 @@ class VideoProcessingService : Service() {
             .build()
     }
 
+    /**
+     * Rough remaining time, from the source duration and the progress so far.
+     *
+     * Without this a 50-minute 1080p recording shows a bare percentage for
+     * over an hour and looks stuck.
+     */
+    private fun remainingText(progress: Int): String {
+        if (progress !in 1..99 || currentJobDurationMs <= 0L) return ""
+        val elapsedMs = System.currentTimeMillis() - currentJobStartedAt
+        if (elapsedMs <= 0L) return ""
+        val totalMs = elapsedMs * 100L / progress
+        val remainingMin = ((totalMs - elapsedMs) / 60_000L).coerceAtLeast(0L)
+        return if (remainingMin > 0) " · 约剩 ${remainingMin} 分钟" else " · 即将完成"
+    }
+
+    private var lastNotifiedAt = 0L
+
     private fun notifyProgress(progress: Float) {
         val pct = (progress * 100).toInt().coerceIn(0, 100)
         if (pct == lastNotifiedPct) return
-        if (pct != 100 && pct - lastNotifiedPct < 5) return
+
+        // Throttle by time, not by percentage. On a 50-minute recording each
+        // percent takes over half a minute, and the old "only every 5%" rule
+        // left the notification frozen for minutes at a time — which reads as
+        // a hang. One update a second is cheap and keeps the ETA fresh.
+        val now = System.currentTimeMillis()
+        val done = pct >= 100
+        if (!done && now - lastNotifiedAt < NOTIFY_MIN_INTERVAL_MS) return
+
         lastNotifiedPct = pct
+        lastNotifiedAt = now
         getSystemService(NotificationManager::class.java)
             .notify(NOTIFY_ID, buildNotification(pct, JobStore.pendingCount(this)))
     }
