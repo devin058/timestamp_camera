@@ -6,10 +6,14 @@ import androidx.camera.core.CameraSelector
 import androidx.camera.core.ImageCapture
 import androidx.camera.core.ImageCaptureException
 import androidx.camera.core.Preview
+import androidx.camera.core.UseCaseGroup
 import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.camera.view.PreviewView
 import androidx.camera.video.FileOutputOptions
+import androidx.camera.video.FallbackStrategy
 import androidx.camera.video.PendingRecording
+import androidx.camera.video.Quality
+import androidx.camera.video.QualitySelector
 import androidx.camera.video.Recorder
 import androidx.camera.video.Recording
 import androidx.camera.video.VideoCapture
@@ -51,6 +55,18 @@ class CameraController(private val context: Context) {
     private var onVideoStarted: ((File) -> Unit)? = null
     private var onVideoFinalized: ((File, errorMsg: String?) -> Unit)? = null
 
+    /**
+     * Burns the timestamp into frames while recording, so transcoding does not
+     * have to composite it later. Null when the device can't provide it, in
+     * which case [VideoProcessor] falls back to stamping during transcode.
+     */
+    private var timestampBurner: TimestampBurner? = null
+
+    /** True when the current/next recording already has the stamp burned in. */
+    @Volatile
+    var isStampedDuringRecording: Boolean = false
+        private set
+
     private var currentLensFacing: Int = CameraSelector.LENS_FACING_BACK
     private var currentPreviewView: PreviewView? = null
     private var currentLifecycleOwner: LifecycleOwner? = null
@@ -89,6 +105,8 @@ class CameraController(private val context: Context) {
     fun release() {
         currentRecording?.close()
         currentRecording = null
+        timestampBurner?.close()
+        timestampBurner = null
         stop()
         cameraExecutor.shutdown()
     }
@@ -164,6 +182,14 @@ class CameraController(private val context: Context) {
             else onComplete(file)
         }
 
+        // Anchor the burned-in clock to the instant recording starts.
+        val startWallTimeMs = System.currentTimeMillis()
+        timestampBurner?.anchor(startWallTimeMs)
+        isStampedDuringRecording = timestampBurner != null
+
+        // The overlay effect has already run by the time Finalize arrives.
+        val recordStartedAtWallMs = startWallTimeMs
+
         val outputOptions = FileOutputOptions.Builder(videoFile).build()
         val pending: PendingRecording = rec.prepareRecording(context, outputOptions)
             .withAudioEnabled()
@@ -226,19 +252,39 @@ class CameraController(private val context: Context) {
             .build()
 
         val r = Recorder.Builder()
+            // Without a quality selector the recorder happily writes whatever
+            // the sensor produces: a 53-minute take came out at 6.8 GB. The
+            // output is re-encoded to at most 1080p anyway, so capturing above
+            // that only costs disk and makes the transcode slower.
+            .setQualitySelector(
+                QualitySelector.fromOrderedList(
+                    listOf(Quality.FHD, Quality.HD, Quality.SD),
+                    FallbackStrategy.lowerQualityOrHigherThan(Quality.SD)
+                )
+            )
             .build()
         recorder = r
         videoCapture = VideoCapture.Builder(r)
             .build()
 
+        // Stamp frames as they are recorded. Devices that can't run the effect
+        // simply get null here and the transcode pass stamps instead.
+        timestampBurner = timestampBurner ?: TimestampBurner.create { throwable ->
+            Log.e(TAG, "Timestamp overlay failed; falling back to transcode stamp", throwable)
+        }
+
+        val effects = listOfNotNull(timestampBurner?.effect)
+
         try {
-            provider.bindToLifecycle(
-                lifecycleOwner,
-                cameraSelector,
-                preview,
-                imageCapture,
-                videoCapture
-            )
+            // Effects ride along on a UseCaseGroup; the plain overload has no
+            // parameter for them.
+            val groupBuilder = UseCaseGroup.Builder()
+            preview?.let(groupBuilder::addUseCase)
+            imageCapture?.let(groupBuilder::addUseCase)
+            videoCapture?.let(groupBuilder::addUseCase)
+            effects.forEach(groupBuilder::addEffect)
+
+            provider.bindToLifecycle(lifecycleOwner, cameraSelector, groupBuilder.build())
         } catch (e: Exception) {
             Log.e(TAG, "Use-case binding failed", e)
         }

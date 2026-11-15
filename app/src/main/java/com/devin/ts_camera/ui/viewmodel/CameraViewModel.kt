@@ -10,6 +10,7 @@ import androidx.lifecycle.LifecycleOwner
 import androidx.lifecycle.viewModelScope
 import com.devin.ts_camera.camera.CameraController
 import com.devin.ts_camera.location.LocationProvider
+import com.devin.ts_camera.location.ReverseGeocoder
 import com.devin.ts_camera.media.MediaStoreSaver
 import com.devin.ts_camera.media.TimestampWatermark
 import com.devin.ts_camera.media.VideoProcessor
@@ -25,6 +26,7 @@ import java.io.File
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
+import kotlin.math.abs
 
 class CameraViewModel(application: Application) : AndroidViewModel(application) {
 
@@ -42,6 +44,12 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
     private var captureSequence = 0
 
     private var locationJob: Job? = null
+    private var addressJob: Job? = null
+
+    private companion object {
+        /** Roughly 100 m — smaller moves won't change the street name. */
+        const val ADDRESS_MOVE_THRESHOLD = 0.001
+    }
 
     init {
         // Start location tracking once permission is granted
@@ -51,9 +59,38 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
                     locationJob = viewModelScope.launch {
                         locationProvider.location.collect { loc ->
                             _uiState.update { it.copy(location = loc) }
+                            resolveAddress(loc)
                         }
                     }
                 }
+            }
+        }
+    }
+
+    /**
+     * Reverse-geocode the fix and attach the address to the current location.
+     *
+     * Location updates arrive every couple of seconds, so lookups are
+     * throttled: an address is only fetched once the device has moved far
+     * enough to plausibly change street, and never while one is in flight.
+     */
+    private fun resolveAddress(loc: LocationData) {
+        if (addressJob?.isActive == true) return
+        val last = _uiState.value.location
+        val moved = last == null ||
+                last.address == null ||
+                abs(last.latitude - loc.latitude) > ADDRESS_MOVE_THRESHOLD ||
+                abs(last.longitude - loc.longitude) > ADDRESS_MOVE_THRESHOLD
+        if (!moved && addressJob != null) return
+
+        addressJob = viewModelScope.launch {
+            val address = ReverseGeocoder.lookup(loc.latitude, loc.longitude) ?: return@launch
+            val current = _uiState.value.location ?: return@launch
+            // Only apply it if the fix hasn't moved on since the request.
+            if (abs(current.latitude - loc.latitude) < ADDRESS_MOVE_THRESHOLD &&
+                abs(current.longitude - loc.longitude) < ADDRESS_MOVE_THRESHOLD
+            ) {
+                _uiState.update { it.copy(location = current.copy(address = address)) }
             }
         }
     }
@@ -161,16 +198,38 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
                 val app = getApplication<Application>()
                 val durationMs = SystemClock.elapsedRealtime() - recordingStartTimeMs
 
-                android.util.Log.d("CameraViewModel", "Video done: file=${videoFile.absolutePath}, size=${videoFile.length()}, dur=${durationMs}ms, startWall=$videoRecordingStartWallTimeMs")
+                // The recorder can finalize a file that is missing or empty on
+                // failure paths; queueing it would just log a confusing error
+                // later. Surface it now instead.
+                if (!videoFile.exists() || videoFile.length() == 0L) {
+                    android.util.Log.e(
+                        "CameraViewModel",
+                        "Recorder produced no data: ${videoFile.absolutePath}"
+                    )
+                    _uiState.update {
+                        it.copy(isRecording = false, errorMessage = "录像文件为空，请重试")
+                    }
+                    return@startRecording
+                }
+
+                // When the recorder stamped each frame already, the transcode
+                // pass must not composite a second timestamp on top of it.
+                val alreadyStamped = cameraController.isStampedDuringRecording
+                android.util.Log.d(
+                    "CameraViewModel",
+                    "Video done: file=${videoFile.absolutePath}, size=${videoFile.length()}, " +
+                            "dur=${durationMs}ms, startWall=$videoRecordingStartWallTimeMs, " +
+                            "stampedDuringRecording=$alreadyStamped"
+                )
 
                 // Start background processing service (no preview for videos)
                 com.devin.ts_camera.media.VideoProcessingService.start(
                     app,
                     inputUri = Uri.fromFile(videoFile),
                     startWallTimeMs = videoRecordingStartWallTimeMs,
-                    durationMs = durationMs
+                    durationMs = durationMs,
+                    alreadyStamped = alreadyStamped
                 )
-                android.util.Log.d("CameraViewModel", "Service start() called")
 
                 _uiState.update {
                     it.copy(
@@ -292,7 +351,6 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
                 compressionLevel = options.compressionLevel,
                 trimStartMs = options.trimStartMs,
                 trimEndMs = if (options.trimEndMs > 0) options.trimEndMs else video.durationMs,
-                overlayTimestampMs = videoRecordingStartWallTimeMs,
                 videoStartWallTimeMs = videoRecordingStartWallTimeMs,
                 muteAudio = options.muteAudio,
                 fps = options.fps
@@ -363,6 +421,9 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
                 if (video.location != null) {
                     appendLine("  \"latitude\": ${video.location.latitude},")
                     appendLine("  \"longitude\": ${video.location.longitude},")
+                    video.location.address?.takeIf { it.isNotBlank() }?.let {
+                        appendLine("  \"address\": \"${it.replace("\"", "\\\"")}\",")
+                    }
                 }
                 appendLine("  \"resolution\": \"${options.resolution.label}\",")
                 appendLine("  \"compression\": \"${options.compressionLevel.label}\"")

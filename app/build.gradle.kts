@@ -30,12 +30,25 @@ android {
             )
         }
     }
+    // The encoder probe receiver is a debug tool; keep it out of release.
+    sourceSets {
+        getByName("debug") {
+            manifest.srcFile("src/debug/AndroidManifest.xml")
+        }
+    }
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_11
         targetCompatibility = JavaVersion.VERSION_11
     }
     buildFeatures {
         compose = true
+    }
+    testOptions {
+        unitTests {
+            // android.util.Log and JSONObject are stubs in unit tests; without
+            // this every call throws "Method not mocked".
+            isReturnDefaultValues = true
+        }
     }
     packaging {
         jniLibs {
@@ -55,7 +68,6 @@ dependencies {
     implementation(libs.androidx.compose.ui.tooling.preview)
     implementation(libs.androidx.compose.material3)
     implementation(libs.androidx.material.icons.core)
-    implementation(libs.androidx.material.icons.extended)
 
     // CameraX
     implementation(libs.androidx.camera.core)
@@ -63,6 +75,8 @@ dependencies {
     implementation(libs.androidx.camera.lifecycle)
     implementation(libs.androidx.camera.view)
     implementation(libs.androidx.camera.video)
+    // OverlayEffect — burns the timestamp into frames while recording.
+    implementation(libs.androidx.camera.effects)
 
     // Location
     implementation(libs.play.services.location)
@@ -80,6 +94,8 @@ dependencies {
     implementation(libs.androidx.exifinterface)
 
     testImplementation(libs.junit)
+    // Real org.json for JVM tests — the android.jar stub returns nulls.
+    testImplementation(libs.json)
     androidTestImplementation(libs.androidx.junit)
     androidTestImplementation(libs.androidx.espresso.core)
     androidTestImplementation(platform(libs.androidx.compose.bom))

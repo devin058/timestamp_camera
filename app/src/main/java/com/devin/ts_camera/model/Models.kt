@@ -5,13 +5,23 @@ import java.io.File
 
 /**
  * GPS location data captured with media.
+ *
+ * @param address human-readable form of the coordinates, filled in
+ *        asynchronously by reverse geocoding; null until it resolves or when
+ *        the lookup fails.
  */
 data class LocationData(
     val latitude: Double,
     val longitude: Double,
-    val timestamp: Long = System.currentTimeMillis()
+    val timestamp: Long = System.currentTimeMillis(),
+    val address: String? = null
 ) {
-    fun toDisplayString(): String = "%.6f, %.6f".format(latitude, longitude)
+    /**
+     * What to show in the UI. Prefers the address, falling back to raw
+     * coordinates so the user always sees *something* locational.
+     */
+    fun toDisplayString(): String =
+        address?.takeIf { it.isNotBlank() } ?: "%.6f, %.6f".format(latitude, longitude)
 
     fun isValid(): Boolean =
         latitude in -90.0..90.0 && longitude in -180.0..180.0

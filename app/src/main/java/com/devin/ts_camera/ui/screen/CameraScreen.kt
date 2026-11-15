@@ -9,10 +9,12 @@ import androidx.camera.view.PreviewView
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectDragGestures
+import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -43,6 +45,7 @@ fun CameraScreen(
     val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
     var showSettings by remember { mutableStateOf(false) }
+    var showHistory by remember { mutableStateOf(false) }
 
     // Keep screen on only during video recording; allow timeout otherwise
     DisposableEffect(uiState.isRecording) {
@@ -56,6 +59,37 @@ fun CameraScreen(
             activity?.window?.clearFlags(
                 android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON
             )
+        }
+    }
+
+    // ---- Power-save dim during long recordings -----------------------
+    // After every [dimThresholdMs] of recording the screen goes black to save
+    // power. Tapping while dimmed wakes the screen and restarts the timer;
+    // the tap must not also press whatever control sits underneath, or the
+    // user can't stop the recording.
+
+    val dimThresholdMs = 120_000L
+    var isDimmed by remember { mutableStateOf(false) }
+    // Waking the screen snoozes the dim until this instant, so a tap neither
+    // flickers straight back nor disables the dim for the rest of the take.
+    var dimSnoozeUntilMs by remember { mutableLongStateOf(0L) }
+
+    LaunchedEffect(uiState.isRecording) {
+        if (!uiState.isRecording) {
+            isDimmed = false
+            dimSnoozeUntilMs = 0L
+        }
+    }
+    // Deliberately NOT keyed on `isDimmed`: doing so made the effect re-run the
+    // moment a tap cleared the flag, see the duration still over the threshold
+    // and dim again immediately — which looked like a flicker, not a wake.
+    LaunchedEffect(uiState.isRecording, uiState.recordingDurationMs) {
+        if (uiState.isRecording &&
+            !isDimmed &&
+            uiState.recordingDurationMs >= dimThresholdMs &&
+            android.os.SystemClock.elapsedRealtime() >= dimSnoozeUntilMs
+        ) {
+            isDimmed = true
         }
     }
 
@@ -198,6 +232,16 @@ fun CameraScreen(
             Text("⚙", color = Color.White.copy(alpha = 0.5f), fontSize = 26.sp)
         }
 
+        // Recording history (bottom-left, below settings)
+        IconButton(
+            onClick = { showHistory = true },
+            modifier = Modifier
+                .align(Alignment.BottomStart)
+                .padding(bottom = 172.dp, start = 12.dp)
+        ) {
+            Text("🕘", color = Color.White.copy(alpha = 0.5f), fontSize = 24.sp)
+        }
+
         // Recording indicator (video only)
         if (uiState.isRecording) {
             RecordingOverlay(
@@ -246,32 +290,23 @@ fun CameraScreen(
         }
 
         // ---- Power-save dim during long recordings -----------------------
-        // After 2 min, dim screen. Tap to wake for 30 s, then re-dim.
 
-        val dimThresholdMs = 120_000L
-        val wakeTimeoutMs = 30_000L
-        var lastWakeMs by remember { mutableStateOf(0L) }
-        var isDimmed by remember { mutableStateOf(false) }
-
-        LaunchedEffect(uiState.isRecording, uiState.recordingDurationMs) {
-            if (!uiState.isRecording) {
-                isDimmed = false
-            } else if (!isDimmed
-                && uiState.recordingDurationMs >= dimThresholdMs
-                && System.currentTimeMillis() - lastWakeMs >= wakeTimeoutMs
-            ) {
-                isDimmed = true
-            }
-        }
-
-        if (isDimmed) {
+        if (isDimmed && uiState.isRecording) {
+            // Full-screen scrim that swallows the tap — waking the screen must
+            // not also press the capture button underneath.
             Box(
                 modifier = Modifier
                     .fillMaxSize()
                     .background(Color.Black)
-                    .clickable {
-                        lastWakeMs = System.currentTimeMillis()
+                    .clickable(
+                        interactionSource = remember { MutableInteractionSource() },
+                        indication = null
+                    ) {
                         isDimmed = false
+                        // Snooze rather than disable: another full threshold of
+                        // recording should dim again.
+                        dimSnoozeUntilMs =
+                            android.os.SystemClock.elapsedRealtime() + dimThresholdMs
                     },
                 contentAlignment = Alignment.Center
             ) {
@@ -339,6 +374,11 @@ fun CameraScreen(
         // Settings bottom sheet
         if (showSettings) {
             SettingsSheet(onDismiss = { showSettings = false })
+        }
+
+        // Recording history bottom sheet
+        if (showHistory) {
+            HistorySheet(onDismiss = { showHistory = false })
         }
     }
 }
