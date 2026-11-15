@@ -187,6 +187,22 @@ object VideoProcessor {
         val overlay = createTimestampOverlay(context, params, startMs, endMs)
         val outputSize = outputSizeFor(params)
 
+        // Nothing would change if we re-encoded this: the recorder already
+        // burned the stamp in, the source is the requested size, no trim, the
+        // frame rate is untouched, and audio isn't being dropped. Re-encoding
+        // that only costs time and quality, so pass the file through.
+        if (overlay == null && canPassThrough(params, outputSize, startMs, endMs, sourceDurationMs)) {
+            Log.d(TAG, "Recording already matches the requested output; copying")
+            onProgress(1f)
+            inputFile.copyTo(outputFile, overwrite = true)
+            return@withContext Uri.fromFile(outputFile)
+        }
+
+        val sourceSize = getDisplaySize(params.inputUri)
+        val sourceMatchesOutput = sourceSize != null &&
+                sourceSize.width == outputSize.width &&
+                sourceSize.height == outputSize.height
+
         val base = BuildSpec(
             inputPath = inputFile.absolutePath,
             outputPath = outputFile.absolutePath,
@@ -197,7 +213,8 @@ object VideoProcessor {
             height = outputSize.height,
             compression = params.compressionLevel,
             muteAudio = params.muteAudio,
-            fps = params.fps
+            fps = params.fps,
+            sourceMatchesOutput = sourceMatchesOutput
         )
 
         var triedHardware = false
@@ -274,7 +291,8 @@ object VideoProcessor {
         val compression: CompressionLevel,
         val muteAudio: Boolean,
         val fps: Int,
-        val hardwareEncoder: Boolean = true
+        val hardwareEncoder: Boolean = true,
+        val sourceMatchesOutput: Boolean = false
     )
 
     private fun buildCommand(spec: BuildSpec): String =
@@ -290,7 +308,8 @@ object VideoProcessor {
                 compression = spec.compression,
                 muteAudio = spec.muteAudio,
                 fps = spec.fps,
-                hardwareEncoder = spec.hardwareEncoder
+                hardwareEncoder = spec.hardwareEncoder,
+                sourceMatchesOutput = spec.sourceMatchesOutput
             )
         )
 
@@ -376,6 +395,27 @@ object VideoProcessor {
             Log.w(TAG, "Could not build timestamp overlay; continuing without it", e)
             null
         }
+    }
+
+    /**
+     * Whether the source can be published as-is.
+     *
+     * Only true when the transcode would be a no-op: full length (no trim),
+     * source dimensions already equal to the requested output, frame rate
+     * untouched, and audio kept. Anything else still needs a real encode.
+     */
+    private fun canPassThrough(
+        params: TranscodeParams,
+        outputSize: VideoSize,
+        startMs: Long,
+        endMs: Long,
+        sourceDurationMs: Long
+    ): Boolean {
+        if (startMs > 0L || endMs < sourceDurationMs) return false
+        if (params.fps > 0) return false
+
+        val source = getDisplaySize(params.inputUri) ?: return false
+        return source.width == outputSize.width && source.height == outputSize.height
     }
 
     /**

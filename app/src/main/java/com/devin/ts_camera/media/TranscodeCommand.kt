@@ -27,7 +27,9 @@ internal object TranscodeCommand {
         val compression: CompressionLevel,
         val muteAudio: Boolean,
         val fps: Int,
-        val hardwareEncoder: Boolean
+        val hardwareEncoder: Boolean,
+        /** Source already has [width]x[height], so scaling can be skipped. */
+        val sourceMatchesOutput: Boolean = false
     ) {
         val durationMs: Long get() = endMs - startMs
     }
@@ -50,8 +52,12 @@ internal object TranscodeCommand {
         val w = spec.width
         val h = spec.height
         val chain = buildList {
-            add("scale=$w:$h:force_original_aspect_ratio=decrease")
-            add("pad=$w:$h:(ow-iw)/2:(oh-ih)/2:color=black")
+            // Skip the resize entirely when the source already has the target
+            // shape — a no-op scale still costs a full frame copy per frame.
+            if (!spec.sourceMatchesOutput) {
+                add("scale=$w:$h:force_original_aspect_ratio=decrease")
+                add("pad=$w:$h:(ow-iw)/2:(oh-ih)/2:color=black")
+            }
             add("setsar=1")
             if (spec.fps > 0) {
                 add("fps=${spec.fps}")

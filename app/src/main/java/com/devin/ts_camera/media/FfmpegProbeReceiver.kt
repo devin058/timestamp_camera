@@ -49,28 +49,59 @@ class FfmpegProbeReceiver : BroadcastReceiver() {
         val outDir = File(context.cacheDir, "probe").apply { mkdirs() }
         val durationArg = if (seconds > 0) "-t $seconds " else ""
 
+        // Each entry is (label, video args, filter chain override).
+        // `null` for the filter means "infer from the args" (see below).
         val candidates = listOf(
-            "h264_mediacodec nv12" to
-                    "-c:v h264_mediacodec -pix_fmt nv12 -b:v 4M",
-            "h264_mediacodec nv12 +overlay-chain" to
-                    "-c:v h264_mediacodec -pix_fmt nv12 -b:v 4M",
-            "h264_mediacodec nv12 +fps" to
-                    "-c:v h264_mediacodec -pix_fmt nv12 -b:v 4M",
-            "mpeg4 software (reference)" to
-                    "-c:v mpeg4 -q:v 10"
+            Triple(
+                "baseline 10M g30 bf0",
+                "-c:v h264_mediacodec -pix_fmt nv12 -b:v 10M -g 30 -bf 0",
+                null
+            ),
+            Triple(
+                "bitrate 4M",
+                "-c:v h264_mediacodec -pix_fmt nv12 -b:v 4M -g 30 -bf 0",
+                null
+            ),
+            Triple(
+                "bitrate 2M",
+                "-c:v h264_mediacodec -pix_fmt nv12 -b:v 2M -g 30 -bf 0",
+                null
+            ),
+            Triple(
+                "gop 60",
+                "-c:v h264_mediacodec -pix_fmt nv12 -b:v 10M -g 60 -bf 0",
+                null
+            ),
+            Triple(
+                "no -bf flag",
+                "-c:v h264_mediacodec -pix_fmt nv12 -b:v 10M -g 30",
+                null
+            ),
+            Triple(
+                "no scale filter",
+                "-c:v h264_mediacodec -pix_fmt nv12 -b:v 10M -g 30 -bf 0",
+                "setsar=1,format=nv12"
+            ),
+            Triple(
+                "stream copy (no encode)",
+                "-c:v copy",
+                null
+            )
         )
 
-        candidates.forEachIndexed { index, (label, args) ->
+        candidates.forEachIndexed { index, (label, args, filterOverride) ->
             val out = File(outDir, "probe_$index.mp4")
             out.delete()
 
-            // Mirror the real pipeline: scale → pad → fps → format, with the
-            // encoder's pixel format applied last.
-            val pixelFormat = if (args.contains("nv12")) "nv12" else "yuv420p"
+            // Mirror the real pipeline unless the case overrides the chain.
+            val filter = filterOverride ?: run {
+                val pixelFormat = if (args.contains("nv12")) "nv12" else "yuv420p"
+                "scale=720:480:force_original_aspect_ratio=decrease," +
+                        "pad=720:480:(ow-iw)/2:(oh-ih)/2:color=black," +
+                        "setsar=1,format=$pixelFormat"
+            }
             val cmd = "-y $durationArg-i \"$input\" " +
-                    "-vf \"scale=720:480:force_original_aspect_ratio=decrease," +
-                    "pad=720:480:(ow-iw)/2:(oh-ih)/2:color=black," +
-                    "setsar=1,fps=24,format=$pixelFormat\" " +
+                    "-vf \"$filter\" " +
                     "$args -an -f mp4 \"$out\""
 
             val started = System.currentTimeMillis()
