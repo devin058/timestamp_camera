@@ -7,10 +7,6 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Cameraswitch
-import androidx.compose.material.icons.filled.FlashOff
-import androidx.compose.material.icons.filled.FlashOn
-import androidx.compose.material.icons.filled.FlashAuto
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material3.*
 import androidx.compose.runtime.Composable
@@ -50,9 +46,9 @@ fun TopControlsBar(
         if (captureMode == CaptureMode.PHOTO) {
             ControlChip(
                 icon = when (flashMode) {
-                    FlashMode.OFF  -> Icons.Filled.FlashOff
-                    FlashMode.ON   -> Icons.Filled.FlashOn
-                    FlashMode.AUTO -> Icons.Filled.FlashOn
+                    FlashMode.OFF  -> AppIcons.FlashOff
+                    FlashMode.ON   -> AppIcons.FlashOn
+                    FlashMode.AUTO -> AppIcons.FlashAuto
                 },
                 label = flashMode.label,
                 onClick = onFlashClick
