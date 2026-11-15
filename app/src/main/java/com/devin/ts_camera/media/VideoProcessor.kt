@@ -43,6 +43,12 @@ object VideoProcessor {
     /** Floor so short clips still get room for encoder start-up. */
     private const val MIN_SESSION_BUDGET_MS = 5 * 60 * 1000L
 
+    /**
+     * Remuxing copies streams rather than re-encoding, so it is bounded by disk
+     * speed. Generous enough for a multi-gigabyte take.
+     */
+    private const val REMUX_BUDGET_MS = 10 * 60 * 1000L
+
     private fun sessionBudgetMs(mediaDurationMs: Long): Long =
         (mediaDurationMs * MAX_ENCODE_TO_SOURCE_RATIO)
             .coerceAtLeast(MIN_SESSION_BUDGET_MS)
@@ -186,19 +192,52 @@ object VideoProcessor {
         // the whole video.
         val overlay = createTimestampOverlay(context, params, startMs, endMs)
         val outputSize = outputSizeFor(params)
+        val sourceSize = getDisplaySize(params.inputUri)
 
-        // Nothing would change if we re-encoded this: the recorder already
-        // burned the stamp in, the source is the requested size, no trim, the
-        // frame rate is untouched, and audio isn't being dropped. Re-encoding
-        // that only costs time and quality, so pass the file through.
-        if (overlay == null && canPassThrough(params, outputSize, startMs, endMs, sourceDurationMs)) {
-            Log.d(TAG, "Recording already matches the requested output; copying")
-            onProgress(1f)
-            inputFile.copyTo(outputFile, overwrite = true)
-            return@withContext Uri.fromFile(outputFile)
+        // Work out the cheapest way to produce the requested output before
+        // paying for an encode. Muting is the default, and dropping an audio
+        // track does not require touching a single video frame.
+        val passThrough = if (overlay == null && sourceSize != null) {
+            PassThrough.mode(
+                trimmed = startMs > 0L || endMs < sourceDurationMs,
+                fps = params.fps,
+                sourceWidth = sourceSize.width,
+                sourceHeight = sourceSize.height,
+                outputWidth = outputSize.width,
+                outputHeight = outputSize.height
+            )
+        } else {
+            PassThrough.Mode.ENCODE
+        }
+        Log.d(
+            TAG,
+            "Path=$passThrough src=${sourceSize?.width}x${sourceSize?.height} " +
+                    "out=${outputSize.width}x${outputSize.height}"
+        )
+
+        when (passThrough) {
+            PassThrough.Mode.COPY -> {
+                Log.d(TAG, "Recording already matches the requested output; copying")
+                onProgress(1f)
+                inputFile.copyTo(outputFile, overwrite = true)
+                return@withContext Uri.fromFile(outputFile)
+            }
+
+            PassThrough.Mode.REMUX -> {
+                Log.d(TAG, "Only the audio track changes; remuxing without re-encoding")
+                runRemux(
+                    inputPath = inputFile.absolutePath,
+                    outputPath = outputFile.absolutePath,
+                    muteAudio = params.muteAudio,
+                    onProgress = onProgress
+                )
+                onProgress(1f)
+                return@withContext Uri.fromFile(outputFile)
+            }
+
+            PassThrough.Mode.ENCODE -> Unit
         }
 
-        val sourceSize = getDisplaySize(params.inputUri)
         val sourceMatchesOutput = sourceSize != null &&
                 sourceSize.width == outputSize.width &&
                 sourceSize.height == outputSize.height
@@ -398,24 +437,40 @@ object VideoProcessor {
     }
 
     /**
-     * Whether the source can be published as-is.
+     * Copies the video stream and rebuilds the container.
      *
-     * Only true when the transcode would be a no-op: full length (no trim),
-     * source dimensions already equal to the requested output, frame rate
-     * untouched, and audio kept. Anything else still needs a real encode.
+     * Used when the pixels are already correct and only the audio track needs
+     * to change (muting). This is IO-bound and finishes in a fraction of the
+     * time a full encode takes.
      */
-    private fun canPassThrough(
-        params: TranscodeParams,
-        outputSize: VideoSize,
-        startMs: Long,
-        endMs: Long,
-        sourceDurationMs: Long
-    ): Boolean {
-        if (startMs > 0L || endMs < sourceDurationMs) return false
-        if (params.fps > 0) return false
+    private fun runRemux(
+        inputPath: String,
+        outputPath: String,
+        muteAudio: Boolean,
+        onProgress: (Float) -> Unit
+    ) {
+        val cmd = TranscodeCommand.buildRemux(inputPath, outputPath, muteAudio)
+        Log.d(TAG, "FFmpeg (remux): $cmd")
 
-        val source = getDisplaySize(params.inputUri) ?: return false
-        return source.width == outputSize.width && source.height == outputSize.height
+        val finished = CountDownLatch(1)
+        var exitCode: Int = Int.MIN_VALUE
+        FFmpegKit.executeAsync(
+            cmd,
+            { completed ->
+                exitCode = completed.returnCode?.value ?: Int.MIN_VALUE
+                finished.countDown()
+            },
+            { },
+            { }
+        )
+
+        if (!finished.await(REMUX_BUDGET_MS, TimeUnit.MILLISECONDS)) {
+            throw TimeoutException("重新封装超时")
+        }
+        if (exitCode != 0) {
+            throw RuntimeException("重新封装失败 (exit=$exitCode)")
+        }
+        onProgress(1f)
     }
 
     /**

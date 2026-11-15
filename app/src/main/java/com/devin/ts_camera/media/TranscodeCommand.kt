@@ -5,6 +5,60 @@ import com.devin.ts_camera.model.VideoResolution
 import java.io.File
 
 /**
+ * Decides how much work a recording actually needs.
+ *
+ * Re-encoding is the expensive step, so it is only done when the pixels or the
+ * frame timing must change. Dropping audio, however, is a container-level
+ * operation — muting a take whose resolution and timing already match can copy
+ * the video stream and discard the audio track, which takes a fraction of the
+ * time of a full encode. That matters because muting is the default.
+ */
+internal object PassThrough {
+
+    enum class Mode {
+        /** Nothing changes: copy the file. */
+        COPY,
+
+        /** Video stream is copied, audio dropped or remuxed. */
+        REMUX,
+
+        /** Pixels or timing change, so a real encode is required. */
+        ENCODE
+    }
+
+    fun mode(
+        trimmed: Boolean,
+        fps: Int,
+        sourceWidth: Int,
+        sourceHeight: Int,
+        outputWidth: Int,
+        outputHeight: Int
+    ): Mode {
+        if (trimmed) return Mode.ENCODE
+        if (fps > 0) return Mode.ENCODE
+        val sameSize = sourceWidth == outputWidth && sourceHeight == outputHeight
+        return if (sameSize) Mode.REMUX else Mode.ENCODE
+    }
+
+    /**
+     * Whether the recording can be published without touching its pixels.
+     *
+     * True for both [Mode.COPY] and [Mode.REMUX]; the caller checks
+     * [needsAudioDrop] to decide between them.
+     */
+    fun skipsVideoEncode(
+        trimmed: Boolean,
+        fps: Int,
+        sourceWidth: Int,
+        sourceHeight: Int,
+        outputWidth: Int,
+        outputHeight: Int
+    ): Boolean = mode(
+        trimmed, fps, sourceWidth, sourceHeight, outputWidth, outputHeight
+    ) != Mode.ENCODE
+}
+
+/**
  * Builds the FFmpeg command line for a single transcode pass.
  *
  * Kept separate from [VideoProcessor] so the argument ordering — the part that
@@ -121,8 +175,32 @@ internal object TranscodeCommand {
         return "-c:v h264_mediacodec -b:v $bitrate -g 30 -bf 0 -pix_fmt nv12 "
     }
 
-    fun mpeg4Args(compression: CompressionLevel): String {
-        val q = when (compression) {
+    /**
+     * Command that copies the video stream untouched.
+     *
+     * Used when only the audio needs attention (muting) or nothing does at all
+     * — re-encoding identical pixels just burns time.
+     */
+    fun buildRemux(
+        inputPath: String,
+        outputPath: String,
+        muteAudio: Boolean
+    ): String = buildString {
+        append("-y ")
+        append("-i \"$inputPath\" ")
+        append("-map 0:v -c:v copy ")
+        if (muteAudio) {
+            append("-an ")
+        } else {
+            // `?` keeps this valid for sources with no audio track.
+            append("-map 0:a? -c:a copy ")
+        }
+        append("-movflags +faststart ")
+        append("-f mp4 ")
+        append("\"$outputPath\"")
+    }
+
+    fun mpeg4Args(compression: CompressionLevel): String {        val q = when (compression) {
             CompressionLevel.HIGH -> 10
             CompressionLevel.MEDIUM -> 7
             CompressionLevel.LOW -> 5
