@@ -26,11 +26,44 @@ date/time watermark burned into every frame.
 |---|---|
 | UI | **Kotlin** + Jetpack Compose (Material 3) |
 | Camera | **CameraX** |
-| Video processing | **FFmpegKit** (local AAR) — trim, compress, dynamic timestamp, mute, fps |
+| Video processing | **FFmpegKit** (local AAR) — trim, compress, timestamp overlay, mute, fps |
+| Encoding | **H.264 via `h264_mediacodec`** with software `mpeg4` fallback |
 | Background service | **ForegroundService** with notification progress |
 | Image loading | **Coil** |
 | Storage | **MediaStore** (public directories) |
 | Location | **Play Services Location** |
+
+## Video Pipeline
+
+Recordings are handed to a foreground service and transcoded in a single
+decode → filter → encode pass:
+
+- **Hardware first.** `h264_mediacodec` is used when the device exposes an
+  H.264 encoder, falling back to software `mpeg4` if it fails. On the test
+  device this took a 260 s clip from 544 s to ~86 s.
+- **Timestamp overlay.** The stamp is pre-rendered as one PNG per second and
+  composited with `overlay`. Using `drawtext` re-shapes the glyphs for every
+  frame, which was the dominant cost of the old pipeline.
+- **Durable queue.** Jobs are written to `files/video_jobs.json` before
+  processing starts, so a crash or reboot doesn't lose a recording. Failed
+  jobs retry once, then the source is moved to
+  `Android/data/…/files/recovered/` rather than deleted.
+
+> Note: `h264_mediacodec` needs `-pix_fmt nv12`. Asking for `yuv420p` fails
+> with "MediaCodec configure failed" on OMX-based Qualcomm devices. Use the
+> debug probe (below) to check a new device.
+
+### Probing encoders on a device
+
+Debug builds include a receiver that tries several encoder configurations and
+logs which ones succeed:
+
+```bash
+adb shell am broadcast -a com.devin.ts_camera.DEBUG_FFMPEG \
+    -n com.devin.ts_camera/.media.FfmpegProbeReceiver \
+    --es input /data/user/0/com.devin.ts_camera/cache/VID_x.mp4
+adb logcat -s FfmpegProbe
+```
 
 ## Minimum SDK
 

@@ -1,25 +1,39 @@
 package com.devin.ts_camera.media
 
 import android.content.Context
+import android.media.MediaCodecList
 import android.media.MediaMetadataRetriever
 import android.net.Uri
 import android.util.Log
 import com.arthenica.ffmpegkit.FFmpegKit
 import com.arthenica.ffmpegkit.ReturnCode
-import com.arthenica.ffmpegkit.SessionState
 import com.devin.ts_camera.model.CompressionLevel
 import com.devin.ts_camera.model.VideoResolution
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.io.File
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
 
 /**
- * Video post-processing via FFmpeg — trim, compress, dynamic timestamp,
- * mute, and frame-rate control in a single pass.
+ * Video post-processing via FFmpeg — trim, scale, timestamp overlay, mute and
+ * frame-rate control in a single decode→filter→encode pass.
+ *
+ * Encoding prefers hardware H.264 (`h264_mediacodec`) and falls back to
+ * software `mpeg4` when the device has no usable encoder or the hardware
+ * attempt fails, so one bad codec can never cost the user their recording.
+ *
+ * The timestamp is baked into one PNG per second and composited with
+ * `overlay`. Doing it with `drawtext` re-shapes the glyphs for every frame,
+ * which dominated the cost of the old pipeline.
  */
 object VideoProcessor {
 
     private const val TAG = "VideoProcessor"
+
+    /** Upper bound on a single encode; long enough for any real recording. */
+    private const val MAX_SESSION_MINUTES = 30L
 
     fun getDurationMs(context: Context, uri: Uri): Long {
         val retriever = MediaMetadataRetriever()
@@ -31,6 +45,51 @@ object VideoProcessor {
         } catch (e: Exception) {
             Log.e(TAG, "Failed to get duration", e)
             0L
+        } finally {
+            retriever.release()
+        }
+    }
+
+    /** Rotation the player applies, in degrees (0/90/180/270). */
+    fun getRotation(uri: Uri): Int {
+        val retriever = MediaMetadataRetriever()
+        return try {
+            retriever.setDataSource(uri.path)
+            retriever.extractMetadata(
+                MediaMetadataRetriever.METADATA_KEY_VIDEO_ROTATION
+            )?.toIntOrNull() ?: 0
+        } catch (e: Exception) {
+            0
+        } finally {
+            retriever.release()
+        }
+    }
+
+    data class VideoSize(val width: Int, val height: Int)
+
+    /**
+     * Frame size as displayed. CameraX stores a landscape buffer plus a
+     * rotation flag, so raw metadata often reads 1920x1080 for a portrait
+     * recording; the overlay must be built for the rotated shape.
+     */
+    fun getDisplaySize(uri: Uri): VideoSize? {
+        val retriever = MediaMetadataRetriever()
+        return try {
+            retriever.setDataSource(uri.path)
+            val w = retriever.extractMetadata(
+                MediaMetadataRetriever.METADATA_KEY_VIDEO_WIDTH
+            )?.toIntOrNull() ?: return null
+            val h = retriever.extractMetadata(
+                MediaMetadataRetriever.METADATA_KEY_VIDEO_HEIGHT
+            )?.toIntOrNull() ?: return null
+            if (w <= 0 || h <= 0) return null
+            when (getRotation(uri)) {
+                90, 270 -> VideoSize(h, w)
+                else -> VideoSize(w, h)
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to get size", e)
+            null
         } finally {
             retriever.release()
         }
@@ -65,15 +124,20 @@ object VideoProcessor {
         val resolution: VideoResolution = VideoResolution.R1080P,
         val compressionLevel: CompressionLevel = CompressionLevel.LOW,
         val trimStartMs: Long = 0L,
+        /** 0 means "to the end of the source". */
         val trimEndMs: Long = 0L,
-        val overlayTimestampMs: Long = 0L,
+        /** Wall-clock time of the source's first frame, or 0 to omit the stamp. */
         val videoStartWallTimeMs: Long = 0L,
         val muteAudio: Boolean = false,
+        /** 0 = keep the source frame rate. */
         val fps: Int = 0
     )
 
     /**
-     * Transcode via FFmpeg — one-pass: trim + scale + dynamic timestamp + mute + fps.
+     * Transcode in a single pass: trim + scale + timestamp + mute + fps.
+     *
+     * @throws IllegalStateException if neither the hardware nor the software
+     *         encoder produced a usable file.
      */
     suspend fun transcode(
         context: Context,
@@ -81,130 +145,255 @@ object VideoProcessor {
         onProgress: (Float) -> Unit = {}
     ): Uri = withContext(Dispatchers.IO) {
 
-        val realDurationMs = if (params.trimEndMs > 0) {
-            val raw = getDurationMs(context, params.inputUri)
-            params.trimEndMs.coerceAtMost(raw)
-        } else {
-            getDurationMs(context, params.inputUri)
+        val sourceDurationMs = getDurationMs(context, params.inputUri)
+        val startMs = params.trimStartMs.coerceIn(0L, sourceDurationMs)
+        val endMs = when {
+            params.trimEndMs > 0 -> params.trimEndMs.coerceIn(startMs, sourceDurationMs)
+            else -> sourceDurationMs
         }
-        val effectiveDurationMs = (realDurationMs - params.trimStartMs).coerceAtLeast(0)
+        val effectiveDurationMs = endMs - startMs
+        if (effectiveDurationMs <= 0L) {
+            throw IllegalArgumentException("输入视频时长为 0 或裁剪范围无效")
+        }
 
-        // —— Build command ——
-        val useDynamic = params.videoStartWallTimeMs > 0
-                && params.overlayTimestampMs > 0
-                && effectiveDurationMs in 1000..300_000
+        val inputFile = params.inputUri.path?.let(::File)
+        if (inputFile == null || !inputFile.exists() || inputFile.length() == 0L) {
+            throw IllegalStateException("输入视频不存在或为空")
+        }
 
-        val cmd = buildCommand(
-            inputPath = params.inputUri.path!!,
-            outputPath = params.outputFile.absolutePath,
-            useDrawtext = useDynamic,
-            startEpochSec = if (useDynamic) params.videoStartWallTimeMs / 1000 else 0,
-            trimStartMs = params.trimStartMs,
-            trimEndMs = realDurationMs,
-            isTrimming = params.trimStartMs > 0 || params.trimEndMs > 0,
-            resolution = params.resolution,
+        val outputFile = params.outputFile
+        if (outputFile.exists()) outputFile.delete()
+
+        // Must use the resolved range, not the raw params: the service passes
+        // trimEndMs = 0 meaning "to the end", and feeding that straight to the
+        // overlay produced a single PNG that `eof_action=repeat` then held for
+        // the whole video.
+        val overlay = createTimestampOverlay(context, params, startMs, endMs)
+        val outputSize = outputSizeFor(params)
+
+        val base = BuildSpec(
+            inputPath = inputFile.absolutePath,
+            outputPath = outputFile.absolutePath,
+            overlay = overlay,
+            startMs = startMs,
+            endMs = endMs,
+            width = outputSize.width,
+            height = outputSize.height,
             compression = params.compressionLevel,
             muteAudio = params.muteAudio,
             fps = params.fps
         )
 
-        Log.d(TAG, "FFmpeg: $cmd")
-
-        // —— Execute (async with progress via StatisticsCallback) ——
-        val progressLock = Object()
-        var lastProgressMs = 0.0
-        val session = FFmpegKit.executeAsync(cmd, { }, { }, { stats ->
-            synchronized(progressLock) {
-                lastProgressMs = stats.time
-            }
-        })
+        var triedHardware = false
         try {
-            // Poll progress until FFmpeg finishes
-            while (session.state != SessionState.COMPLETED
-                && session.state != SessionState.FAILED
-            ) {
-                val currentMs = synchronized(progressLock) { lastProgressMs }
-                if (currentMs > 0.0 && effectiveDurationMs > 0) {
-                    onProgress((currentMs.toFloat() / effectiveDurationMs).coerceIn(0f, 0.99f))
-                }
-                kotlinx.coroutines.delay(200L)
+            if (isHardwareH264EncoderAvailable()) {
+                triedHardware = true
+                runFfmpeg(base.copy(hardwareEncoder = true), effectiveDurationMs, onProgress)
+                Log.d(TAG, "Hardware encode OK, ${outputFile.length()} bytes")
+            } else {
+                Log.w(TAG, "No H.264 hardware encoder; using software")
+                runFfmpeg(base.copy(hardwareEncoder = false), effectiveDurationMs, onProgress)
             }
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            // Only fall back if the failure came from the hardware attempt —
+            // retrying software after software already failed just wastes time.
+            if (!triedHardware) throw e
+            Log.w(TAG, "Hardware encode failed, retrying in software", e)
+            outputFile.delete()
+            runFfmpeg(base.copy(hardwareEncoder = false), effectiveDurationMs, onProgress)
         } finally {
-            session.cancel()
+            overlay?.deleteRecursively()
         }
 
-        if (ReturnCode.isSuccess(session.returnCode)) {
-            onProgress(1f)
-        } else {
-            Log.e(TAG, "FFmpeg failed: ${session.allLogsAsString}")
-            throw RuntimeException("视频转码失败")
+        if (!outputFile.exists() || outputFile.length() == 0L) {
+            throw IllegalStateException("转码未产生有效文件")
         }
 
-        Uri.fromFile(params.outputFile)
+        onProgress(1f)
+        Uri.fromFile(outputFile)
     }
 
-    // ---- Command builder -------------------------------------------------
+    /**
+     * Last-resort export: remux/transcode with a plain filter chain and no
+     * timestamp, used when the normal pass cannot produce a file at all.
+     *
+     * A recording without the burned-in stamp is far better than no recording,
+     * so this never throws — the caller decides what to tell the user.
+     */
+    suspend fun transcodeWithoutStamp(
+        context: Context,
+        params: TranscodeParams,
+        onProgress: (Float) -> Unit = {}
+    ): Uri? = withContext(Dispatchers.IO) {
+        val inputFile = params.inputUri.path?.let(::File) ?: return@withContext null
+        if (!inputFile.exists()) return@withContext null
 
-    private fun buildCommand(
-        inputPath: String, outputPath: String, useDrawtext: Boolean, startEpochSec: Long,
-        trimStartMs: Long, trimEndMs: Long, isTrimming: Boolean,
-        resolution: VideoResolution, compression: CompressionLevel,
-        muteAudio: Boolean, fps: Int
-    ): String = buildString {
-        append("-y ")
-
-        // Trim (output option — accurate)
-        if (isTrimming) {
-            append("-ss ${fmtSec(trimStartMs)} ")
-            append("-to ${fmtSec(trimEndMs)} ")
+        try {
+            transcode(context, params.copy(videoStartWallTimeMs = 0L), onProgress)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            Log.e(TAG, "Fallback transcode without timestamp failed", e)
+            null
         }
-        append("-i \"$inputPath\" ")
+    }
 
-        // Video filter chain
-        val filters = mutableListOf<String>()
-        // Dynamic timestamp via drawtext (no external file needed)
-        if (useDrawtext) {
-            // %{localtime\:<epoch>+t} → wall-clock time at each frame
-            filters.add(
-                "drawtext=text='%{localtime}':fontfile=/system/fonts/Roboto-Regular.ttf:" +
-                "fontsize=36:fontcolor=white@0.9:" +
-                "box=1:boxcolor=black@0.4:boxborderw=6:" +
-                "x=(w-text_w)/2:y=h-th-30"
+    /** Everything needed to build one FFmpeg command line. */
+    private data class BuildSpec(
+        val inputPath: String,
+        val outputPath: String,
+        val overlay: File?,
+        val startMs: Long,
+        val endMs: Long,
+        val width: Int,
+        val height: Int,
+        val compression: CompressionLevel,
+        val muteAudio: Boolean,
+        val fps: Int,
+        val hardwareEncoder: Boolean = true
+    )
+
+    private fun buildCommand(spec: BuildSpec): String =
+        TranscodeCommand.build(
+            TranscodeCommand.Spec(
+                inputPath = spec.inputPath,
+                outputPath = spec.outputPath,
+                overlay = spec.overlay,
+                startMs = spec.startMs,
+                endMs = spec.endMs,
+                width = spec.width,
+                height = spec.height,
+                compression = spec.compression,
+                muteAudio = spec.muteAudio,
+                fps = spec.fps,
+                hardwareEncoder = spec.hardwareEncoder
             )
+        )
+
+    // ---- FFmpeg session ---------------------------------------------------
+
+    private fun runFfmpeg(
+        spec: BuildSpec,
+        durationMs: Long,
+        onProgress: (Float) -> Unit
+    ) {
+        val cmd = buildCommand(spec)
+        Log.d(TAG, "FFmpeg: $cmd")
+
+        // This FFmpegKit build has no session.await(), so the completion
+        // callback is the only reliable "process exited" signal — polling
+        // getState() can report COMPLETED while output is still flushing.
+        val finished = CountDownLatch(1)
+        var exitCode: Int = Int.MIN_VALUE
+        val session = FFmpegKit.executeAsync(
+            cmd,
+            { completed ->
+                exitCode = completed.returnCode?.value ?: Int.MIN_VALUE
+                finished.countDown()
+            },
+            { },
+            { stats ->
+                if (durationMs > 0 && stats.time > 0) {
+                    onProgress((stats.time.toFloat() / durationMs).coerceIn(0f, 0.99f))
+                }
+            }
+        )
+
+        // Hardware encodes of a long video legitimately take minutes; the
+        // timeout only guards against a wedged process.
+        if (!finished.await(MAX_SESSION_MINUTES * 60L, TimeUnit.SECONDS)) {
+            FFmpegKit.cancel(session.sessionId)
+            throw IllegalStateException("转码超时（${MAX_SESSION_MINUTES} 分钟）")
         }
-        filters.add("format=yuv420p")
-        append("-vf \"${filters.joinToString(",")}\" ")
 
-        // Frame rate
-        if (fps > 0) {
-            append("-r $fps ")
+        if (exitCode == Int.MIN_VALUE) {
+            val logs = session.allLogsAsString ?: ""
+            Log.e(TAG, "FFmpeg produced no exit code: $logs")
+            throw IllegalStateException("转码异常结束")
         }
+        if (!ReturnCode.isSuccess(ReturnCode(exitCode))) {
+            val logs = session.allLogsAsString ?: ""
+            Log.e(TAG, "FFmpeg failed ($exitCode): $logs")
+            val reason = logs.lineSequence()
+                .map { it.trim() }
+                .lastOrNull { it.isNotEmpty() && !it.startsWith("frame=") }
+            throw RuntimeException("FFmpeg 失败: ${reason ?: exitCode}")
+        }
+    }
 
-        // Video codec — software mpeg4
-        append("-c:v mpeg4 ")
-        append("-q:v ${when (compression) {
-            CompressionLevel.HIGH -> "10"; CompressionLevel.MEDIUM -> "7"; CompressionLevel.LOW -> "5"
-        }} ")
+    private fun createTimestampOverlay(
+        context: Context,
+        params: TranscodeParams,
+        startMs: Long,
+        endMs: Long
+    ): File? {
+        if (params.videoStartWallTimeMs <= 0L) return null
+        return try {
+            val display = getDisplaySize(params.inputUri)
+                ?: VideoSize(params.resolution.width, params.resolution.height)
 
-        // Audio
-        if (muteAudio) {
-            append("-an ")
+            // Scale the stamp to the output size, not the source size.
+            val scale = minOf(
+                params.resolution.width.toFloat() / display.width,
+                params.resolution.height.toFloat() / display.height
+            ).coerceAtMost(1f)
+            val outW = (display.width * scale).toInt().coerceAtLeast(16)
+            val outH = (display.height * scale).toInt().coerceAtLeast(16)
+
+            TimestampOverlay.renderToFile(
+                cacheDir = context.cacheDir,
+                width = outW,
+                height = outH,
+                firstStampWallTimeMs = params.videoStartWallTimeMs + startMs,
+                durationMs = endMs - startMs
+            )
+        } catch (e: Exception) {
+            Log.w(TAG, "Could not build timestamp overlay; continuing without it", e)
+            null
+        }
+    }
+
+    /**
+     * Output dimensions with the source's orientation preserved.
+     *
+     * The resolution presets are landscape (720x480, 1920x1080…). Feeding a
+     * portrait recording through them letterboxes it inside a landscape frame,
+     * which is not what the user saw while shooting.
+     */
+    private fun outputSizeFor(
+        params: TranscodeParams
+    ): VideoSize {
+        val display = getDisplaySize(params.inputUri)
+            ?: return VideoSize(params.resolution.width, params.resolution.height)
+
+        val preset = params.resolution
+        val longEdge = maxOf(preset.width, preset.height)
+        val shortEdge = minOf(preset.width, preset.height)
+
+        return if (display.height > display.width) {
+            VideoSize(shortEdge, longEdge)
         } else {
-            append("-c:a aac -b:a 128k ")
+            VideoSize(longEdge, shortEdge)
         }
+    }
 
-        // Output
-        append("\"$outputPath\"")
+    /**
+     * Whether the device exposes an H.264 encoder usable by FFmpeg's
+     * MediaCodec wrapper. Checked up front so an unsupported device falls
+     * straight to software instead of wasting time on a doomed encode.
+     */
+    private fun isHardwareH264EncoderAvailable(): Boolean = try {
+        MediaCodecList(MediaCodecList.REGULAR_CODECS).codecInfos.any { info ->
+            info.isEncoder && info.supportedTypes.any {
+                it.equals("video/avc", ignoreCase = true)
+            }
+        }
+    } catch (e: Exception) {
+        Log.w(TAG, "Could not query encoders", e)
+        false
     }
 
     private fun fmtSec(ms: Long) = "%.3f".format(ms / 1000.0)
-
-    private fun parseTimeToMs(s: String): Long {
-        val p = s.split(":", ".")
-        if (p.size < 3) return 0
-        return (p[0].toLongOrNull()?.times(3600_000) ?: 0) +
-                (p[1].toLongOrNull()?.times(60_000) ?: 0) +
-                (p[2].toLongOrNull()?.times(1000) ?: 0) +
-                (p.getOrNull(3)?.padEnd(3, '0')?.take(3)?.toLongOrNull() ?: 0)
-    }
 }

@@ -1,0 +1,37 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Debug-only additions. Merged into the main manifest for debug builds so the
+  encoder probe never ships in release.
+
+  Trigger the probe with:
+    adb shell am broadcast -a com.devin.ts_camera.DEBUG_FFMPEG
+      -n com.devin.ts_camera/.media.FfmpegProbeReceiver
+      plus the "es input" extra pointing at a file on the device.
+-->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <application>
+        <receiver
+            android:name=".media.FfmpegProbeReceiver"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="com.devin.ts_camera.DEBUG_FFMPEG" />
+            </intent-filter>
+        </receiver>
+
+        <receiver
+            android:name=".media.DebugEnqueueReceiver"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="com.devin.ts_camera.DEBUG_ENQUEUE" />
+            </intent-filter>
+        </receiver>
+
+        <receiver
+            android:name=".media.FrameDumpReceiver"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="com.devin.ts_camera.DEBUG_FRAMES" />
+            </intent-filter>
+        </receiver>
+    </application>
+</manifest>
